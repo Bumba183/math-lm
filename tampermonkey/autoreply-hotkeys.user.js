@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      1.6.0
+// @version      1.7.0
 // @description  Автоответы по текстовому триггеру вроде !1 или по горячим клавишам, плюс боковая панель со сведениями о заказе (покупатель, исполнитель, дата загрузки и покупки, сколько товар пролежал).
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -59,24 +59,32 @@
     title: 'Данные заказа',
     site: 'ieq37.com/*',               // маски адресов, по одной в строке; пусто — панель не показывается
     limitDays: 7,                      // сколько дней товар считается свежим
-    packs: { url: '', column: 'Товар', selector: '', values: [], counted: [] },   // словарь фасовок и что учитывать
+    hideEmpty: true,                   // не показывать строки, для которых на странице нет данных
+    packs: { url: '~/product-packing/list/', column: 'Товар', selector: '', values: [], counted: [] },
     fields: [
+      // Блок «О покупателе» на странице тикета — читается по подписям
       { label: 'Покупатель', source: 'label', query: 'Покупатель', selector: '', attr: '', regex: '', mode: 'text' },
-      { label: 'Курьер', source: 'label', query: 'Курьер', selector: '', attr: '', regex: '', mode: 'text' },
+      { label: 'Заказов всего', source: 'label', query: 'Заказов всего', selector: '', attr: '', regex: '', mode: 'text' },
+      { label: 'Сумма заказов', source: 'label', query: 'Общая сумма заказов', selector: '', attr: '', regex: '', mode: 'text' },
+      { label: 'За 30 дней', source: 'label', query: 'Заказы за последние 30 дней', selector: '', attr: '', regex: '', mode: 'text' },
+      { label: 'Средний чек', source: 'label', query: 'Средний чек', selector: '', attr: '', regex: '', mode: 'text' },
+      { label: 'Тикетов всего', source: 'label', query: 'Кол-во тикетов всего', selector: '', attr: '', regex: '', mode: 'text' },
+
+      // Страница заказа: не вышел ли срок годности
       { label: 'Дата загрузки', source: 'label', query: 'Дата загрузки', selector: '', attr: '', regex: '', mode: 'text' },
       { label: 'Дата покупки', source: 'label', query: 'Дата создания заказа', selector: '', attr: '', regex: '', mode: 'text' },
       { label: 'Пролежал до покупки', source: 'between', from: 'Дата загрузки', to: 'Дата покупки' },
-      { label: 'Прошло с загрузки', source: 'between', from: 'Дата загрузки', to: '__now__' },
-      { label: 'Заказов всего', source: 'count', table: 'Последние заказы', column: '', value: '', exclude: false,
-        linkSelector: 'Покупатель', pages: 5, rowSelector: '', whereSelector: '', whereText: '', usePacks: false },
-      { label: 'Выполненных', source: 'count', table: 'Последние заказы', column: 'Статус', value: 'Выполнен',
-        exclude: false, linkSelector: 'Покупатель', pages: 5, rowSelector: '', whereSelector: '', whereText: '',
+
+      // Полные списки покупателя: «Покупатель» → его страница → «Подробнее»
+      { label: 'Заказов в списке', source: 'count', table: '*', column: '', value: '', exclude: false,
+        linkSelector: 'Покупатель -> Подробнее', pages: 5, rowSelector: '', whereSelector: '', whereText: '',
         usePacks: false },
-      { label: 'Тикетов', source: 'count', table: 'Тикеты пользователя', column: '', value: '', exclude: false,
-        linkSelector: 'Покупатель', pages: 5, rowSelector: '', whereSelector: '', whereText: '', usePacks: false },
-      { label: 'Тикетов по заказам', source: 'count', table: 'Тикеты пользователя', column: 'Тип',
-        value: 'Вопросы по заказу', exclude: false, linkSelector: 'Покупатель', pages: 5, rowSelector: '',
-        whereSelector: '', whereText: '', usePacks: false }
+      { label: 'Тикетов в списке', source: 'count', table: '*', column: '', value: '', exclude: false,
+        linkSelector: 'Покупатель -> Подробнее#2', pages: 5, rowSelector: '', whereSelector: '', whereText: '',
+        usePacks: false },
+      { label: 'Тикетов по проблемным фасовкам', source: 'count', table: '*', column: '', value: '', exclude: false,
+        linkSelector: 'Покупатель -> Подробнее#2', pages: 5, rowSelector: '', whereSelector: '', whereText: '',
+        usePacks: true }
     ]
   };
 
@@ -1341,6 +1349,15 @@
       onLabel.append(onBox, document.createTextNode('Показывать панель'));
       body.appendChild(onLabel);
 
+      const hideLabel = h('label', 'check');
+      hideLabel.style.marginTop = '6px';
+      const hideBox = h('input');
+      hideBox.type = 'checkbox';
+      hideBox.checked = side.hideEmpty !== false;
+      hideBox.addEventListener('change', () => { side.hideEmpty = hideBox.checked; });
+      hideLabel.append(hideBox, document.createTextNode('Скрывать строки, для которых на странице нет данных'));
+      body.appendChild(hideLabel);
+
       const row = h('div', 'row');
       const titleLabel = h('label', null, 'Заголовок панели');
       const titleInput = h('input');
@@ -2013,39 +2030,59 @@
     return (doc && doc.arhUrl) || location.href;
   }
 
-  /** Один шаг перехода: адрес, CSS-селектор ссылки или её текст. */
+  /** «~/путь» — от корня раздела: подставляет первый сегмент текущего адреса (код кабинета). */
+  function expandUrl(raw, base) {
+    let value = String(raw || '').trim();
+    if (value.indexOf('~/') === 0) {
+      const segment = location.pathname.split('/').filter(Boolean)[0] || '';
+      value = '/' + (segment ? segment + '/' : '') + value.slice(2);
+    }
+    try { return new URL(value, base || location.href).href; } catch (e) { return null; }
+  }
+
+  /**
+   * Один шаг перехода: адрес, CSS-селектор ссылки, её текст или подпись строки.
+   * Если таких ссылок несколько, нужную выбирает номер: «Подробнее#2».
+   */
   function findLinkInDoc(doc, step) {
-    const raw = String(step || '').trim();
+    let raw = String(step || '').trim();
     if (!raw) return null;
+
+    let nth = 1;
+    const numbered = /#(\d+)\s*$/.exec(raw);
+    if (numbered) {
+      nth = parseInt(numbered[1], 10) || 1;
+      raw = raw.slice(0, numbered.index).trim();
+    }
+
     const base = docUrl(doc);
+    const href = (el) => {
+      const value = el.getAttribute('href') ||
+        (el.querySelector && el.querySelector('a[href]') && el.querySelector('a[href]').getAttribute('href'));
+      return value ? expandUrl(value, base) : null;
+    };
+    const pick = (list) => {
+      const urls = list.map(href).filter(Boolean);
+      return urls.length ? (urls[nth - 1] || null) : null;
+    };
 
-    if (/^https?:\/\//i.test(raw) || raw.charAt(0) === '/') {
-      try { return new URL(raw, base).href; } catch (e) { return null; }
+    if (/^https?:\/\//i.test(raw) || raw.charAt(0) === '/' || raw.indexOf('~/') === 0) {
+      return expandUrl(raw, base);
     }
 
-    let el = null;
-    try { el = doc.querySelector(raw); } catch (e) { el = null; }
-    if (el) {
-      const href = el.getAttribute('href') ||
-        (el.querySelector('a[href]') && el.querySelector('a[href]').getAttribute('href'));
-      if (href) {
-        try { return new URL(href, base).href; } catch (e) { return null; }
-      }
-    }
+    let bySelector = [];
+    try { bySelector = Array.prototype.slice.call(doc.querySelectorAll(raw)); } catch (e) { bySelector = []; }
+    const fromSelector = pick(bySelector);
+    if (fromSelector) return fromSelector;
 
     const needle = normalizeText(raw);
-    const links = doc.querySelectorAll('a[href]');
-    for (let i = 0; i < links.length; i++) {
-      if (normalizeText(links[i].textContent).indexOf(needle) !== -1) {
-        try { return new URL(links[i].getAttribute('href'), base).href; } catch (e) { return null; }
-      }
-    }
+    const byText = Array.prototype.slice.call(doc.querySelectorAll('a[href]'))
+      .filter((link) => normalizeText(link.textContent).indexOf(needle) !== -1);
+    const fromText = pick(byText);
+    if (fromText) return fromText;
 
     const byLabel = linkByLabel(doc, raw);                // «Покупатель» — подпись, ссылка рядом
-    if (byLabel) {
-      try { return new URL(byLabel.getAttribute('href'), base).href; } catch (e) { return null; }
-    }
-    return null;
+    return byLabel ? href(byLabel) : null;
   }
 
   /**
@@ -2367,9 +2404,12 @@
       return;
     }
 
+    let shown = 0;
     fields.forEach((field) => {
       const result = extractField(field, fields);
       const value = result.value;
+      if (!value && panel.hideEmpty) return;            // на этой странице такого поля нет
+      shown += 1;
       const row = h('div', 'side-row' + (result.alarm ? ' side-alarm' : ''));
       row.append(
         h('span', 'side-label', field.label || field.query || field.selector),
@@ -2388,6 +2428,8 @@
       }
       body.appendChild(row);
     });
+
+    if (!shown) body.appendChild(h('div', 'side-empty', 'На этой странице данных для панели нет'));
   }
 
   function startWatchingPage() {
@@ -2443,6 +2485,14 @@
   function findTableByHeading(doc, title) {
     const needle = normalizeText(title);
     if (!needle) return null;
+
+    if (needle === '*') {                                // «*» — самая длинная таблица страницы
+      let best = null;
+      Array.prototype.forEach.call(doc.querySelectorAll('table'), (table) => {
+        if (!best || dataRows(table).length > dataRows(best).length) best = table;
+      });
+      return best;
+    }
 
     const tables = Array.prototype.slice.call(doc.querySelectorAll('table'));
     for (let i = 0; i < tables.length; i++) {
@@ -2510,8 +2560,9 @@
     const docs = [];
 
     if (packs.url) {
-      let url = null;
-      try { url = new URL(packs.url, location.href); } catch (e) { return []; }
+      const expanded = expandUrl(packs.url, location.href);
+      if (!expanded) return [];
+      const url = new URL(expanded);
       if (url.origin !== location.origin) return [];
       const doc = getRemoteDoc(url.href);
       if (doc) docs.push(doc);
