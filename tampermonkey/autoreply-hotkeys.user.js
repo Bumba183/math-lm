@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      1.3.0
+// @version      1.4.0
 // @description  Автоответы по текстовому триггеру вроде !1 или по горячим клавишам, плюс боковая панель со сведениями о заказе (покупатель, исполнитель, дата загрузки и покупки, сколько товар пролежал).
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -57,15 +57,18 @@
     enabled: true,
     collapsed: false,
     title: 'Данные заказа',
-    site: '',                          // маски адресов, по одной в строке; пусто — панель не показывается
+    site: 'ieq37.com/*',               // маски адресов, по одной в строке; пусто — панель не показывается
     limitDays: 7,                      // сколько дней товар считается свежим
+    packs: { url: '', column: 'Товар', selector: '', values: [], counted: [] },   // словарь фасовок и что учитывать
     fields: [
       { label: 'Покупатель', source: 'label', query: 'Покупатель', selector: '', attr: '', regex: '', mode: 'text' },
       { label: 'Курьер', source: 'label', query: 'Курьер', selector: '', attr: '', regex: '', mode: 'text' },
       { label: 'Дата загрузки', source: 'label', query: 'Дата загрузки', selector: '', attr: '', regex: '', mode: 'text' },
       { label: 'Дата покупки', source: 'label', query: 'Дата создания заказа', selector: '', attr: '', regex: '', mode: 'text' },
       { label: 'Пролежал до покупки', source: 'between', from: 'Дата загрузки', to: 'Дата покупки' },
-      { label: 'Прошло с загрузки', source: 'between', from: 'Дата загрузки', to: '__now__' }
+      { label: 'Прошло с загрузки', source: 'between', from: 'Дата загрузки', to: '__now__' },
+      { label: 'Заказов всего', source: 'count', linkSelector: '', rowSelector: '', whereSelector: '', whereText: '', usePacks: false },
+      { label: 'Заказов с тикетом', source: 'count', linkSelector: '', rowSelector: '', whereSelector: '', whereText: '', usePacks: true }
     ]
   };
 
@@ -876,7 +879,7 @@
     '.pfield { border: 1px solid #e6e8ee; border-radius: 10px; padding: 9px; margin-bottom: 9px; }',
     '.pfield .line { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin-bottom: 7px; }',
     '.pfield .line:last-child { margin-bottom: 0; }',
-    '.pfield input[type="text"] { width: auto; flex: 1 1 150px; }',
+    '.line input[type="text"] { width: auto; flex: 1 1 150px; }',
     'select { padding: 6px 8px; border-radius: 8px; border: 1px solid #ccd1dc; background: #f5f6f9;',
     '  color: inherit; font-size: 13px; }',
     'textarea.small { min-height: 66px; }',
@@ -1367,8 +1370,108 @@
       siteLabel.appendChild(here);
       body.appendChild(siteLabel);
 
+      if (!side.packs) side.packs = { url: '', column: 'Товар', selector: '', values: [], counted: [] };
+      const packs = side.packs;
+
+      const packsBox = h('div');
+      packsBox.style.marginTop = '16px';
+      const packsHint = h('p', 'hint');
+      packsHint.innerHTML = '<b>Фасовки.</b> Соберите список существующих фасовок и отметьте те, по которым ' +
+        'тикет считается проблемным (почтовые отправления обычно учитывать не нужно). Варианты берутся со ' +
+        'страницы по адресу — из колонки с указанным заголовком; повторы отсекаются.';
+      packsBox.appendChild(packsHint);
+
+      const urlLine = h('div', 'line');
+      const urlInput = h('input');
+      urlInput.type = 'text';
+      urlInput.value = packs.url || '';
+      urlInput.placeholder = 'https://сайт/.../product-packing/list/';
+      urlInput.addEventListener('input', () => { packs.url = urlInput.value.trim(); });
+      const columnInput = h('input');
+      columnInput.type = 'text';
+      columnInput.value = packs.column || '';
+      columnInput.placeholder = 'колонка: Товар';
+      columnInput.style.flex = '0 1 150px';
+      columnInput.addEventListener('input', () => { packs.column = columnInput.value.trim(); });
+      urlLine.append(h('span', 'pval', 'список фасовок'), urlInput, columnInput);
+      packsBox.appendChild(urlLine);
+
+      const packLine = h('div', 'line');
+      const packInput = h('input');
+      packInput.type = 'text';
+      packInput.value = packs.selector || '';
+      packInput.placeholder = 'ячейка фасовки в списке заказов (необязательно)';
+      packInput.addEventListener('input', () => { packs.selector = packInput.value; });
+      const packPick = h('button', null, 'Указать');
+      packPick.title = 'Кликните ячейку с фасовкой в списке заказов';
+      packPick.addEventListener('click', () => pickElement((path, el) => {
+        if (!el) return;
+        packs.selector = shortSelector(el);
+        packInput.value = packs.selector;
+      }));
+      const packScan = h('button', null, 'Собрать список');
+      packScan.addEventListener('click', () => {
+        const run = (second) => {
+          const found = collectPacks(packs);
+          if (found.length) {
+            packs.values = found;
+            renderPacks();
+            preview();
+            toast('Найдено фасовок: ' + found.length);
+            return;
+          }
+          if (packs.url && !second) {
+            toast('Загружаю страницу со списком…');
+            setTimeout(() => run(true), 1500);
+            return;
+          }
+          toast('Не нашлось — проверьте адрес, название колонки или селектор');
+        };
+        run(false);
+      });
+      packLine.append(packInput, packPick, packScan);
+      packsBox.appendChild(packLine);
+
+      const packList = h('div', 'line');
+      packList.style.cssText = 'flex-direction: column; align-items: stretch; gap: 2px;';
+      packsBox.appendChild(packList);
+
+      function renderPacks() {
+        packList.textContent = '';
+        if (!packs.values || !packs.values.length) {
+          packList.appendChild(h('span', 'pval', 'Варианты не собраны — нажмите «Собрать со страницы».'));
+          return;
+        }
+        const tools = h('div', 'line');
+        const all = h('button', 'icon', 'отметить все');
+        all.addEventListener('click', () => { packs.counted = packs.values.slice(); renderPacks(); preview(); });
+        const none = h('button', 'icon', 'снять все');
+        none.addEventListener('click', () => { packs.counted = []; renderPacks(); preview(); });
+        tools.append(all, none);
+        packList.appendChild(tools);
+
+        packs.values.forEach((value) => {
+          const label = h('label', 'check');
+          label.style.marginTop = '0';
+          const box = h('input');
+          box.type = 'checkbox';
+          box.checked = (packs.counted || []).indexOf(value) !== -1;
+          box.addEventListener('change', () => {
+            const list = packs.counted || (packs.counted = []);
+            const at = list.indexOf(value);
+            if (box.checked && at === -1) list.push(value);
+            if (!box.checked && at !== -1) list.splice(at, 1);
+            preview();
+          });
+          label.append(box, document.createTextNode(value));
+          packList.appendChild(label);
+        });
+      }
+      renderPacks();
+      body.appendChild(packsBox);
+
       const list = h('div');
-      list.style.marginTop = '14px';
+      list.style.marginTop = '16px';
       body.appendChild(list);
 
       const preview = () => {
@@ -1392,7 +1495,8 @@
           name.addEventListener('input', () => { field.label = name.value; });
 
           const source = h('select');
-          [['label', 'по подписи'], ['css', 'по селектору'], ['between', 'разница дат']].forEach((pair) => {
+          [['label', 'по подписи'], ['css', 'по селектору'], ['between', 'разница дат'],
+            ['count', 'счётчик по списку']].forEach((pair) => {
             const option = h('option', null, pair[1]);
             option.value = pair[0];
             source.appendChild(option);
@@ -1407,7 +1511,55 @@
           card.appendChild(line1);
 
           const line2 = h('div', 'line');
-          if (field.source === 'between') {
+          const extraLines = [];
+          if (field.source === 'count') {
+            const textInput = (value, placeholder, apply) => {
+              const input = h('input');
+              input.type = 'text';
+              input.value = value || '';
+              input.placeholder = placeholder;
+              input.addEventListener('input', () => { apply(input.value); preview(); });
+              return input;
+            };
+            const pickInto = (input, apply, unique) => {
+              const button = h('button', null, 'Указать');
+              button.addEventListener('click', () => pickElement((path, el) => {
+                if (!el) return;
+                const value = unique ? path : shortSelector(el);   // строки ищем «по виду», ссылку — точную
+                input.value = value;
+                apply(value);
+                preview();
+              }));
+              return button;
+            };
+
+            const rows = textInput(field.rowSelector, 'строка списка: tr.order', (v) => { field.rowSelector = v; });
+            line2.append(h('span', 'pval', 'что считаем'), rows, pickInto(rows, (v) => { field.rowSelector = v; }));
+
+            const lineFrom = h('div', 'line');
+            const link = textInput(field.linkSelector, 'ссылка на список, если он на другой странице',
+              (v) => { field.linkSelector = v; });
+            lineFrom.append(h('span', 'pval', 'откуда'), link, pickInto(link, (v) => { field.linkSelector = v; }, true));
+            extraLines.push(lineFrom);
+
+            const lineIf = h('div', 'line');
+            const where = textInput(field.whereSelector, 'признак тикета: .ticket', (v) => { field.whereSelector = v; });
+            const whereText = textInput(field.whereText, 'или текст в строке', (v) => { field.whereText = v; });
+            lineIf.append(h('span', 'pval', 'считать строку, если есть'), where,
+              pickInto(where, (v) => { field.whereSelector = v; }), whereText);
+            extraLines.push(lineIf);
+
+            const linePacks = h('div', 'line');
+            const onlyPacks = h('label', 'check');
+            onlyPacks.style.marginTop = '0';
+            const onlyBox = h('input');
+            onlyBox.type = 'checkbox';
+            onlyBox.checked = !!field.usePacks;
+            onlyBox.addEventListener('change', () => { field.usePacks = onlyBox.checked; preview(); });
+            onlyPacks.append(onlyBox, document.createTextNode('Только отмеченные фасовки'));
+            linePacks.appendChild(onlyPacks);
+            extraLines.push(linePacks);
+          } else if (field.source === 'between') {
             const names = side.fields.filter((other) => other !== field && other.label).map((other) => other.label);
             const build = (value, onChange) => {
               const select = h('select');
@@ -1465,6 +1617,7 @@
             line2.append(query, pick);
           }
           card.appendChild(line2);
+          extraLines.forEach((line) => card.appendChild(line));
 
           const line3 = h('div', 'line');
           line3.appendChild(h('span', 'pval', ''));
@@ -1779,6 +1932,64 @@
     return (minutes < 0 ? '−' : '') + (parts.join(' ') || '0 мин');
   }
 
+  function normalizeText(value) {
+    return String(value == null ? '' : value).replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  /** Короткий селектор «по виду», а не по единственности: чтобы совпадали все такие же строки. */
+  function shortSelector(el) {
+    if (!el || el.nodeType !== 1) return '';
+    const part = (node) => {
+      let out = node.tagName.toLowerCase();
+      const classes = Array.prototype.slice.call(node.classList || [])
+        .filter((name) => /^[a-zA-Z][\w-]*$/.test(name))
+        .slice(0, 2);
+      if (classes.length) return out + '.' + classes.map(cssEscape).join('.');
+      const parent = node.parentElement;
+      if (parent) {
+        const sameTag = Array.prototype.slice.call(parent.children).filter((c) => c.tagName === node.tagName);
+        if (sameTag.length > 1) out += ':nth-of-type(' + (sameTag.indexOf(node) + 1) + ')';
+      }
+      return out;
+    };
+    const own = part(el);
+    if (/[.:]/.test(own) || !el.parentElement) return own;
+    return part(el.parentElement) + ' > ' + own;
+  }
+
+  // Страницы, подгруженные в фоне (например профиль покупателя)
+  const remoteCache = new Map();
+  const REMOTE_TTL = 60000;
+
+  function getRemoteDoc(url) {
+    const cached = remoteCache.get(url);
+    const now = Date.now();
+    if (cached && (cached.loading || now - cached.time < REMOTE_TTL)) return cached.doc || null;
+
+    remoteCache.set(url, { loading: true, time: now, doc: cached && cached.doc });
+    fetch(url, { credentials: 'include' })
+      .then((response) => response.text())
+      .then((html) => {
+        remoteCache.set(url, { doc: new DOMParser().parseFromString(html, 'text/html'), time: Date.now() });
+        fillSidePanel();
+      })
+      .catch(() => {
+        remoteCache.set(url, { doc: null, time: Date.now() });
+        fillSidePanel();
+      });
+    return (cached && cached.doc) || null;
+  }
+
+  /** Где искать строки списка: на этой странице или на подгруженной по ссылке. */
+  function countScope(field) {
+    if (!field.linkSelector) return document;
+    let link = null;
+    try { link = document.querySelector(field.linkSelector); } catch (e) { return '⚠ селектор ссылки'; }
+    if (!link || !link.href) return null;
+    if (new URL(link.href, location.href).origin !== location.origin) return '⚠ страница другого сайта';
+    return getRemoteDoc(link.href) || '…';
+  }
+
   const VALUE_TAGS = { TD: 1, TH: 1, DD: 1, DT: 1, SPAN: 1, DIV: 1, P: 1, B: 1, STRONG: 1, A: 1 };
 
   /** Значение из строки «подпись → значение»: ищем подпись и берём соседнюю ячейку. */
@@ -1828,6 +2039,47 @@
       const span = to.getTime() - from.getTime();
       const limit = Number(panelConfig().limitDays) || 0;
       return { value: formatSpan(span), alarm: limit > 0 && span > limit * 86400000 };
+    }
+
+    if (field.source === 'count') {
+      if (!field.rowSelector) return { value: '' };
+      const scope = countScope(field);
+      if (typeof scope === 'string') return { value: scope };
+      if (!scope) return { value: '' };
+
+      let rows;
+      try {
+        rows = Array.prototype.slice.call(scope.querySelectorAll(field.rowSelector));
+      } catch (e) {
+        return { value: '⚠ селектор строк не понят' };
+      }
+
+      const packs = panelConfig().packs || {};
+      const counted = (packs.counted || []).map(normalizeText);
+      const usePacks = !!field.usePacks && counted.length > 0;
+      const needle = normalizeText(field.whereText);
+
+      let total = 0;
+      rows.forEach((row) => {
+        if (field.whereSelector) {
+          let hit = null;
+          try { hit = row.querySelector(field.whereSelector); } catch (e) { return; }
+          if (!hit) return;
+        }
+        if (needle && normalizeText(row.textContent).indexOf(needle) === -1) return;
+        if (usePacks) {
+          if (packs.selector) {
+            let cell = null;
+            try { cell = row.querySelector(packs.selector); } catch (e) { return; }
+            if (!cell || counted.indexOf(normalizeText(cell.textContent)) === -1) return;
+          } else {
+            const text = normalizeText(row.textContent);
+            if (!counted.some((value) => text.indexOf(value) !== -1)) return;
+          }
+        }
+        total += 1;
+      });
+      return { value: String(total) };
     }
 
     let nodes;
@@ -2001,6 +2253,62 @@
     });
     window.addEventListener('popstate', fire);
     window.addEventListener('hashchange', fire);
+  }
+
+  /** Значения колонки таблицы по заголовку — например колонки «Товар». */
+  function collectColumn(doc, name) {
+    const needle = normalizeText(name).replace(/[:：]$/, '');
+    const out = [];
+    Array.prototype.forEach.call(doc.querySelectorAll('table'), (table) => {
+      const rows = Array.prototype.slice.call(table.rows || []);
+      for (let r = 0; r < Math.min(rows.length, 3); r++) {
+        const cells = Array.prototype.slice.call(rows[r].cells || []);
+        let index = -1;
+        cells.forEach((cell, i) => {
+          if (index === -1 && normalizeText(cell.textContent).replace(/[:：]$/, '') === needle) index = i;
+        });
+        if (index === -1) continue;
+        for (let k = r + 1; k < rows.length; k++) {
+          const cell = rows[k].cells && rows[k].cells[index];
+          if (cell) out.push(String(cell.textContent || '').replace(/\s+/g, ' ').trim());
+        }
+        return;
+      }
+    });
+    return out;
+  }
+
+  /** Словарь фасовок: со страницы по адресу (если указан) или с открытых страниц. Повторы отсекаются. */
+  function collectPacks(packs) {
+    if (!packs) return [];
+    const docs = [];
+
+    if (packs.url) {
+      let url = null;
+      try { url = new URL(packs.url, location.href); } catch (e) { return []; }
+      if (url.origin !== location.origin) return [];
+      const doc = getRemoteDoc(url.href);
+      if (doc) docs.push(doc);
+    } else {
+      docs.push(document);
+      remoteCache.forEach((entry) => { if (entry && entry.doc) docs.push(entry.doc); });
+    }
+
+    const seen = new Map();
+    const add = (text) => {
+      const value = String(text || '').replace(/\s+/g, ' ').trim();
+      if (value && value.length <= 80 && !seen.has(normalizeText(value))) seen.set(normalizeText(value), value);
+    };
+
+    docs.forEach((doc) => {
+      if (packs.column) collectColumn(doc, packs.column).forEach(add);
+      if (packs.selector) {
+        try {
+          Array.prototype.forEach.call(doc.querySelectorAll(packs.selector), (node) => add(node.textContent));
+        } catch (e) { /* кривой селектор — пропускаем */ }
+      }
+    });
+    return Array.from(seen.values()).slice(0, 200);
   }
 
   // ---------- Выбор элемента мышью ----------
