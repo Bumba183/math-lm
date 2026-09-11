@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      1.5.0
+// @version      1.6.0
 // @description  Автоответы по текстовому триггеру вроде !1 или по горячим клавишам, плюс боковая панель со сведениями о заказе (покупатель, исполнитель, дата загрузки и покупки, сколько товар пролежал).
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -68,14 +68,15 @@
       { label: 'Пролежал до покупки', source: 'between', from: 'Дата загрузки', to: 'Дата покупки' },
       { label: 'Прошло с загрузки', source: 'between', from: 'Дата загрузки', to: '__now__' },
       { label: 'Заказов всего', source: 'count', table: 'Последние заказы', column: '', value: '', exclude: false,
-        linkSelector: '', rowSelector: '', whereSelector: '', whereText: '', usePacks: false },
+        linkSelector: 'Покупатель', pages: 5, rowSelector: '', whereSelector: '', whereText: '', usePacks: false },
       { label: 'Выполненных', source: 'count', table: 'Последние заказы', column: 'Статус', value: 'Выполнен',
-        exclude: false, linkSelector: '', rowSelector: '', whereSelector: '', whereText: '', usePacks: false },
+        exclude: false, linkSelector: 'Покупатель', pages: 5, rowSelector: '', whereSelector: '', whereText: '',
+        usePacks: false },
       { label: 'Тикетов', source: 'count', table: 'Тикеты пользователя', column: '', value: '', exclude: false,
-        linkSelector: '', rowSelector: '', whereSelector: '', whereText: '', usePacks: false },
+        linkSelector: 'Покупатель', pages: 5, rowSelector: '', whereSelector: '', whereText: '', usePacks: false },
       { label: 'Тикетов по заказам', source: 'count', table: 'Тикеты пользователя', column: 'Тип',
-        value: 'Вопросы по заказу', exclude: false, linkSelector: '', rowSelector: '', whereSelector: '',
-        whereText: '', usePacks: false }
+        value: 'Вопросы по заказу', exclude: false, linkSelector: 'Покупатель', pages: 5, rowSelector: '',
+        whereSelector: '', whereText: '', usePacks: false }
     ]
   };
 
@@ -1559,9 +1560,13 @@
             lineFilter.append(h('span', 'pval', 'фильтр'), column, wanted, exclude);
 
             const lineFrom = h('div', 'line');
-            const link = textInput(field.linkSelector, 'ссылка на список, если он на другой странице',
+            const link = textInput(field.linkSelector, 'Покупатель -> Подробный разбор (или адрес/селектор)',
               (v) => { field.linkSelector = v; });
-            lineFrom.append(h('span', 'pval', 'откуда'), link, pickInto(link, (v) => { field.linkSelector = v; }, true));
+            const pagesInput = textInput(field.pages, 'страниц', (v) => { field.pages = v; });
+            pagesInput.className = 'num';
+            pagesInput.title = 'Сколько страниц списка обойти, если он разбит на страницы';
+            lineFrom.append(h('span', 'pval', 'откуда'), link, pickInto(link, (v) => { field.linkSelector = v; }, true),
+              h('span', 'pval', 'страниц'), pagesInput);
             extraLines.push(lineFrom, lineFilter);
 
             const lineIf = h('div', 'line');
@@ -1992,7 +1997,9 @@
     fetch(url, { credentials: 'include' })
       .then((response) => response.text())
       .then((html) => {
-        remoteCache.set(url, { doc: new DOMParser().parseFromString(html, 'text/html'), time: Date.now() });
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        doc.arhUrl = url;                                  // база для относительных ссылок
+        remoteCache.set(url, { doc: doc, time: Date.now() });
         fillSidePanel();
       })
       .catch(() => {
@@ -2002,47 +2009,200 @@
     return (cached && cached.doc) || null;
   }
 
-  /** Где искать строки списка: на этой странице или на подгруженной по ссылке. */
+  function docUrl(doc) {
+    return (doc && doc.arhUrl) || location.href;
+  }
+
+  /** Один шаг перехода: адрес, CSS-селектор ссылки или её текст. */
+  function findLinkInDoc(doc, step) {
+    const raw = String(step || '').trim();
+    if (!raw) return null;
+    const base = docUrl(doc);
+
+    if (/^https?:\/\//i.test(raw) || raw.charAt(0) === '/') {
+      try { return new URL(raw, base).href; } catch (e) { return null; }
+    }
+
+    let el = null;
+    try { el = doc.querySelector(raw); } catch (e) { el = null; }
+    if (el) {
+      const href = el.getAttribute('href') ||
+        (el.querySelector('a[href]') && el.querySelector('a[href]').getAttribute('href'));
+      if (href) {
+        try { return new URL(href, base).href; } catch (e) { return null; }
+      }
+    }
+
+    const needle = normalizeText(raw);
+    const links = doc.querySelectorAll('a[href]');
+    for (let i = 0; i < links.length; i++) {
+      if (normalizeText(links[i].textContent).indexOf(needle) !== -1) {
+        try { return new URL(links[i].getAttribute('href'), base).href; } catch (e) { return null; }
+      }
+    }
+
+    const byLabel = linkByLabel(doc, raw);                // «Покупатель» — подпись, ссылка рядом
+    if (byLabel) {
+      try { return new URL(byLabel.getAttribute('href'), base).href; } catch (e) { return null; }
+    }
+    return null;
+  }
+
+  /**
+   * Где искать строки списка. Можно пройти цепочку ссылок: «Покупатель -> Подробный разбор»,
+   * чтобы со страницы тикета попасть в полный список заказов пользователя.
+   */
   function countScope(field) {
-    if (!field.linkSelector) return document;
-    let link = null;
-    try { link = document.querySelector(field.linkSelector); } catch (e) { return '⚠ селектор ссылки'; }
-    if (!link || !link.href) return null;
-    if (new URL(link.href, location.href).origin !== location.origin) return '⚠ страница другого сайта';
-    return getRemoteDoc(link.href) || '…';
+    const chain = String(field.linkSelector || '').split('->').map((step) => step.trim()).filter(Boolean);
+    if (!chain.length) return document;
+
+    let doc = document;
+    for (let i = 0; i < chain.length; i++) {
+      const url = findLinkInDoc(doc, chain[i]);
+      if (!url) return null;
+      if (new URL(url).origin !== location.origin) return '⚠ страница другого сайта';
+      const next = getRemoteDoc(url);
+      if (!next) return '…';
+      doc = next;
+    }
+    return doc;
+  }
+
+  const NEXT_WORDS = ['следующая', 'следующие', 'далее', 'дальше', 'вперёд', 'вперед', 'next', '›', '»', '→', '>'];
+
+  /** Ссылка на следующую страницу списка, если он разбит на страницы. */
+  function findNextPage(doc) {
+    const base = docUrl(doc);
+    const rel = doc.querySelector('a[rel="next"]');
+    const take = (el) => {
+      if (!el) return null;
+      try { return new URL(el.getAttribute('href'), base).href; } catch (e) { return null; }
+    };
+    if (rel) return take(rel);
+
+    const links = Array.prototype.slice.call(doc.querySelectorAll('a[href]'));
+    for (let i = 0; i < links.length; i++) {
+      const text = normalizeText(links[i].textContent);
+      const title = normalizeText(links[i].getAttribute('title') || links[i].getAttribute('aria-label'));
+      if (!text && !title) continue;
+      if (NEXT_WORDS.indexOf(text) !== -1 || NEXT_WORDS.indexOf(title) !== -1) return take(links[i]);
+    }
+
+    // Нумерованная постраничка: берём ссылку с номером на единицу больше активного
+    const active = doc.querySelector('.active, [aria-current="page"], .current');
+    const current = active ? parseInt(normalizeText(active.textContent), 10) : NaN;
+    if (isFinite(current)) {
+      for (let i = 0; i < links.length; i++) {
+        if (parseInt(normalizeText(links[i].textContent), 10) === current + 1) return take(links[i]);
+      }
+    }
+    return null;
   }
 
   const VALUE_TAGS = { TD: 1, TH: 1, DD: 1, DT: 1, SPAN: 1, DIV: 1, P: 1, B: 1, STRONG: 1, A: 1 };
 
-  /** Значение из строки «подпись → значение»: ищем подпись и берём соседнюю ячейку. */
-  function valueByLabel(query) {
-    const needle = String(query || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    if (!needle) return '';
-    const nodes = document.querySelectorAll('th, td, dt, dd, span, div, p, b, strong, label');
+  function nodeText(node) {
+    return String((node && (node.innerText || node.textContent)) || '').replace(/\s+/g, ' ').trim();
+  }
 
+  /** Элементы «напротив подписи»: соседняя ячейка строки, следующий элемент, следующая ячейка таблицы. */
+  function labelCandidates(doc, query) {
+    const needle = normalizeText(query).replace(/[:：]$/, '');
+    const out = [];
+    if (!needle) return out;
+
+    const nodes = doc.querySelectorAll('th, td, dt, dd, span, div, p, b, strong, label');
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i];
-      const own = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
-      if (own.toLowerCase().replace(/[:：]\s*$/, '') !== needle) continue;
+      if (normalizeText(node.textContent).replace(/[:：]$/, '') !== needle) continue;
 
-      const candidates = [];
-      if (node.nextElementSibling) candidates.push(node.nextElementSibling);
-      if (node.parentElement && node.parentElement.nextElementSibling) {
-        candidates.push(node.parentElement.nextElementSibling);
-      }
+      if (node.nextElementSibling) out.push(node.nextElementSibling);
+      if (node.parentElement && node.parentElement.nextElementSibling) out.push(node.parentElement.nextElementSibling);
       const row = node.closest && node.closest('tr');
       if (row) {
         const cells = Array.prototype.slice.call(row.children);
-        const index = cells.indexOf(node.tagName === 'TD' || node.tagName === 'TH' ? node : node.closest('td, th'));
-        if (index !== -1 && cells[index + 1]) candidates.push(cells[index + 1]);
-      }
-
-      for (let j = 0; j < candidates.length; j++) {
-        const text = (candidates[j].innerText || candidates[j].textContent || '').replace(/\s+/g, ' ').trim();
-        if (text && text.toLowerCase() !== needle) return text;
+        const cell = node.tagName === 'TD' || node.tagName === 'TH' ? node : (node.closest && node.closest('td, th'));
+        const index = cells.indexOf(cell);
+        if (index !== -1 && cells[index + 1]) out.push(cells[index + 1]);
       }
     }
+    return out;
+  }
+
+  /** Значение из строки «подпись → значение». */
+  function valueByLabel(query) {
+    const needle = normalizeText(query);
+    const candidates = labelCandidates(document, query);
+    for (let i = 0; i < candidates.length; i++) {
+      const text = nodeText(candidates[i]);
+      if (text && normalizeText(text) !== needle) return text;
+    }
     return '';
+  }
+
+  /** Ссылка из ячейки напротив подписи: «Покупатель» → ссылка на его страницу. */
+  function linkByLabel(doc, query) {
+    const candidates = labelCandidates(doc, query);
+    for (let i = 0; i < candidates.length; i++) {
+      const node = candidates[i];
+      if (node.tagName === 'A' && node.getAttribute('href')) return node;
+      const inner = node.querySelector && node.querySelector('a[href]');
+      if (inner) return inner;
+    }
+    return null;
+  }
+
+  /** Сколько строк на одной странице подходит под условия поля. */
+  function countRowsIn(field, scope) {
+    let rows = [];
+    let table = null;
+    if (field.table) {
+      table = findTableByHeading(scope, field.table);
+      if (!table) return null;                       // таблицы на странице нет — это не «ноль строк»
+      rows = dataRows(table);
+    } else {
+      try {
+        rows = Array.prototype.slice.call(scope.querySelectorAll(field.rowSelector));
+      } catch (e) {
+        return '⚠ селектор строк не понят';
+      }
+    }
+
+    // фильтр по колонке: «Статус = Выполнен», «Тип = Вопросы по заказу» и т. п.
+    const column = table && field.column ? columnIndex(table, field.column) : -1;
+    const wanted = String(field.value || '').split(',').map(normalizeText).filter(Boolean);
+    const packs = panelConfig().packs || {};
+    const counted = (packs.counted || []).map(normalizeText);
+    const usePacks = !!field.usePacks && counted.length > 0;
+    const needle = normalizeText(field.whereText);
+
+    let total = 0;
+    rows.forEach((row) => {
+      if (column !== -1 && wanted.length) {
+        const cell = row.cells && row.cells[column];
+        const text = normalizeText(cell ? cell.textContent : '');
+        const hit = wanted.some((value) => text.indexOf(value) !== -1);
+        if (field.exclude ? hit : !hit) return;
+      }
+      if (field.whereSelector) {
+        let hit = null;
+        try { hit = row.querySelector(field.whereSelector); } catch (e) { return; }
+        if (!hit) return;
+      }
+      if (needle && normalizeText(row.textContent).indexOf(needle) === -1) return;
+      if (usePacks) {
+        if (packs.selector) {
+          let cell = null;
+          try { cell = row.querySelector(packs.selector); } catch (e) { return; }
+          if (!cell || counted.indexOf(normalizeText(cell.textContent)) === -1) return;
+        } else {
+          const text = normalizeText(row.textContent);
+          if (!counted.some((value) => text.indexOf(value) !== -1)) return;
+        }
+      }
+      total += 1;
+    });
+    return total;
   }
 
   /** Значение одного поля панели. Возвращает { value, alarm }. */
@@ -2069,55 +2229,25 @@
       if (typeof scope === 'string') return { value: scope };
       if (!scope) return { value: '' };
 
-      let rows = [];
-      let table = null;
-      if (field.table) {
-        table = findTableByHeading(scope, field.table);
-        if (!table) return { value: '' };
-        rows = dataRows(table);
-      } else {
-        try {
-          rows = Array.prototype.slice.call(scope.querySelectorAll(field.rowSelector));
-        } catch (e) {
-          return { value: '⚠ селектор строк не понят' };
-        }
-      }
-
-      // фильтр по колонке: «Статус = Выполнен», «Тип = Вопросы по заказу» и т. п.
-      const column = table && field.column ? columnIndex(table, field.column) : -1;
-      const wanted = String(field.value || '').split(',').map(normalizeText).filter(Boolean);
-
-      const packs = panelConfig().packs || {};
-      const counted = (packs.counted || []).map(normalizeText);
-      const usePacks = !!field.usePacks && counted.length > 0;
-      const needle = normalizeText(field.whereText);
-
+      const pages = Math.max(1, Math.min(20, Math.round(Number(field.pages) || 1)));
       let total = 0;
-      rows.forEach((row) => {
-        if (column !== -1 && wanted.length) {
-          const cell = row.cells && row.cells[column];
-          const text = normalizeText(cell ? cell.textContent : '');
-          const hit = wanted.some((value) => text.indexOf(value) !== -1);
-          if (field.exclude ? hit : !hit) return;
+      let page = scope;
+      for (let step = 0; step < pages; step++) {
+        const counted = countRowsIn(field, page);
+        if (typeof counted === 'string') return { value: counted };
+        if (counted === null) {
+          if (step === 0) return { value: '' };      // список не найден вообще
+          break;                                     // на следующей странице списка уже нет
         }
-        if (field.whereSelector) {
-          let hit = null;
-          try { hit = row.querySelector(field.whereSelector); } catch (e) { return; }
-          if (!hit) return;
-        }
-        if (needle && normalizeText(row.textContent).indexOf(needle) === -1) return;
-        if (usePacks) {
-          if (packs.selector) {
-            let cell = null;
-            try { cell = row.querySelector(packs.selector); } catch (e) { return; }
-            if (!cell || counted.indexOf(normalizeText(cell.textContent)) === -1) return;
-          } else {
-            const text = normalizeText(row.textContent);
-            if (!counted.some((value) => text.indexOf(value) !== -1)) return;
-          }
-        }
-        total += 1;
-      });
+        total += counted;
+        if (step === pages - 1) break;
+        const nextUrl = findNextPage(page);
+        if (!nextUrl) break;
+        if (new URL(nextUrl).origin !== location.origin) break;
+        const nextDoc = getRemoteDoc(nextUrl);
+        if (!nextDoc) return { value: '…' };               // ждём остальные страницы
+        page = nextDoc;
+      }
       return { value: String(total) };
     }
 
