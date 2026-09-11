@@ -2,8 +2,8 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      1.2.0
-// @description  Заготовленные автоответы вставляются в поле ввода: напечатайте короткий триггер вроде !1 или нажмите свою комбинацию клавиш. Работает с input, textarea и contenteditable (чаты, соцсети, тикет-системы, CRM).
+// @version      1.3.0
+// @description  Автоответы по текстовому триггеру вроде !1 или по горячим клавишам, плюс боковая панель со сведениями о заказе (покупатель, исполнитель, дата загрузки и покупки, сколько товар пролежал).
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
 // @license      MIT
@@ -52,13 +52,31 @@
     'Актуально на {date} {time}. Страница: {url}'
   ].join('\n');
 
+  // Панель со сведениями о заказе: включается и настраивается на конкретный сайт
+  const DEFAULT_PANEL = {
+    enabled: true,
+    collapsed: false,
+    title: 'Данные заказа',
+    site: '',                          // маски адресов, по одной в строке; пусто — панель не показывается
+    limitDays: 7,                      // сколько дней товар считается свежим
+    fields: [
+      { label: 'Покупатель', source: 'label', query: 'Покупатель', selector: '', attr: '', regex: '', mode: 'text' },
+      { label: 'Курьер', source: 'label', query: 'Курьер', selector: '', attr: '', regex: '', mode: 'text' },
+      { label: 'Дата загрузки', source: 'label', query: 'Дата загрузки', selector: '', attr: '', regex: '', mode: 'text' },
+      { label: 'Дата покупки', source: 'label', query: 'Дата создания заказа', selector: '', attr: '', regex: '', mode: 'text' },
+      { label: 'Пролежал до покупки', source: 'between', from: 'Дата загрузки', to: 'Дата покупки' },
+      { label: 'Прошло с загрузки', source: 'between', from: 'Дата загрузки', to: '__now__' }
+    ]
+  };
+
   const DEFAULT_CONFIG = {
     text: DEFAULT_TEXT,
     pickerHotkey: 'Ctrl+Alt+Space',    // палитра со списком всех автоответов
     settingsHotkey: 'Ctrl+Alt+0',      // окно настроек
     toasts: true,                      // всплывающие подсказки
     fab: true,                         // круглая кнопка на странице
-    fabPos: null                       // её положение, если пользователь перетащил
+    fabPos: null,                      // её положение, если пользователь перетащил
+    panel: DEFAULT_PANEL               // панель со сведениями о заказе
   };
 
   // ========================== 2. ХРАНИЛИЩЕ ==========================
@@ -835,7 +853,46 @@
     '  border: none; background: #2f6df6; color: #fff; font-size: 20px; line-height: 46px; cursor: pointer;',
     '  box-shadow: 0 6px 18px rgba(0, 0, 0, .28); touch-action: none; user-select: none; }',
     '.fab:hover { background: #275fdd; }',
+    '.side { position: fixed; right: 0; top: 90px; width: 266px; max-height: 72vh; display: flex; flex-direction: column;',
+    '  background: #fff; color: #1b1f27; border: 1px solid #e6e8ee; border-right: none; border-radius: 10px 0 0 10px;',
+    '  box-shadow: -6px 8px 24px rgba(0, 0, 0, .16); font-size: 13px; overflow: hidden; }',
+    '.side.folded { width: auto; }',
+    '.side.folded .side-body { display: none; }',
+    '.side-head { display: flex; align-items: center; gap: 4px; padding: 8px 10px; border-bottom: 1px solid #e6e8ee; }',
+    '.side-head .icon { padding: 2px 7px; font-size: 12px; }',
+    '.side-body { overflow: auto; padding: 6px; }',
+    '.side-row { display: flex; gap: 8px; padding: 5px 6px; border-radius: 7px; }',
+    '.side-row:hover { background: #f2f4f9; }',
+    '.side-label { flex: 0 0 44%; color: #5b6273; }',
+    '.side-value { flex: 1; font-weight: 600; word-break: break-word; }',
+    '.side-dim { font-weight: 400; color: #9aa1b1; }',
+    '.side-alarm { background: #fdeaea; }',
+    '.side-alarm .side-value { color: #b3261e; }',
+    '.side-empty { padding: 10px 6px; color: #5b6273; }',
+    '.pick-box { position: fixed; pointer-events: none; border: 2px solid #2f6df6; border-radius: 4px;',
+    '  background: rgba(47, 109, 246, .12); }',
+    '.pick-bar { position: fixed; left: 50%; top: 14px; transform: translateX(-50%); padding: 8px 14px;',
+    '  border-radius: 999px; background: #1b1f27; color: #fff; font-size: 13px; }',
+    '.pfield { border: 1px solid #e6e8ee; border-radius: 10px; padding: 9px; margin-bottom: 9px; }',
+    '.pfield .line { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; margin-bottom: 7px; }',
+    '.pfield .line:last-child { margin-bottom: 0; }',
+    '.pfield input[type="text"] { width: auto; flex: 1 1 150px; }',
+    'select { padding: 6px 8px; border-radius: 8px; border: 1px solid #ccd1dc; background: #f5f6f9;',
+    '  color: inherit; font-size: 13px; }',
+    'textarea.small { min-height: 66px; }',
+    'input.num { width: 78px; flex: 0 0 auto; }',
+    '.pval { font-size: 12px; color: #5b6273; }',
     '@media (prefers-color-scheme: dark) {',
+    '  .side { background: #1e222b; color: #e7e9ee; border-color: #313745; }',
+    '  .side-head { border-color: #313745; }',
+    '  .side-row:hover { background: #262c38; }',
+    '  .side-label, .side-empty { color: #a3abbd; }',
+    '  .side-dim { color: #6f7891; }',
+    '  .side-alarm { background: rgba(122, 48, 48, .4); }',
+    '  .side-alarm .side-value { color: #ff9a90; }',
+    '  .pfield { border-color: #313745; }',
+    '  select { background: #2a3040; border-color: #3c4354; }',
+    '  .pval { color: #a3abbd; }',
     '  .overlay { color: #e7e9ee; }',
     '  .panel { background: #1e222b; }',
     '  .head, .foot { border-color: #313745; }',
@@ -1015,7 +1072,7 @@
 
   const PLACEHOLDERS = ['{cursor}', '{selection}', '{clipboard}', '{date}', '{time}', '{url}', '{title}', '{ask:Вопрос}'];
 
-  function openSettings() {
+  function openSettings(initialTab) {
     const overlay = createOverlay();
     const panel = h('div', 'panel');
     overlay.appendChild(panel);
@@ -1024,6 +1081,8 @@
     const draft = parseTemplates(config.text).items.map((item) => ({
       hotkey: item.hotkey, trigger: item.trigger, label: item.labelRaw, text: item.text, send: item.send
     }));
+    const side = JSON.parse(JSON.stringify(Object.assign({}, DEFAULT_PANEL, config.panel || {})));
+    if (!Array.isArray(side.fields)) side.fields = [];
     const opts = {
       pickerHotkey: config.pickerHotkey,
       settingsHotkey: config.settingsHotkey,
@@ -1035,8 +1094,9 @@
     const tabs = h('div', 'tabs');
     const tabList = h('button', 'tab', 'Автоответы');
     const tabText = h('button', 'tab', 'Текстом');
+    const tabPanel = h('button', 'tab', 'Панель');
     const tabOpts = h('button', 'tab', 'Настройки');
-    tabs.append(tabList, tabText, tabOpts);
+    tabs.append(tabList, tabText, tabPanel, tabOpts);
     head.append(tabs);
     panel.appendChild(head);
 
@@ -1052,7 +1112,7 @@
     foot.append(count, h('span', 'spacer'), resetBtn, cancelBtn, saveBtn);
     panel.appendChild(foot);
 
-    let active = 'list';
+    let active = initialTab || 'list';
     let rawArea = null;
     let cards = [];
 
@@ -1251,6 +1311,180 @@
       }, 0);
     }
 
+    function renderPanelTab() {
+      cards = [];
+      const hint = h('p', 'hint');
+      hint.innerHTML = 'Панель показывается справа на указанных адресах и берёт значения прямо со страницы. ' +
+        'Обычно подходит режим <b>«по подписи»</b>: пишете подпись строки (например <code>Дата загрузки</code>), ' +
+        'а скрипт берёт значение из соседней ячейки. Поле <b>«разница дат»</b> считает, сколько прошло между ' +
+        'двумя датами, и краснеет, если превышен срок годности.';
+      body.appendChild(hint);
+
+      const onLabel = h('label', 'check');
+      onLabel.style.marginTop = '0';
+      const onBox = h('input');
+      onBox.type = 'checkbox';
+      onBox.checked = !!side.enabled;
+      onBox.addEventListener('change', () => { side.enabled = onBox.checked; });
+      onLabel.append(onBox, document.createTextNode('Показывать панель'));
+      body.appendChild(onLabel);
+
+      const row = h('div', 'row');
+      const titleLabel = h('label', null, 'Заголовок панели');
+      const titleInput = h('input');
+      titleInput.type = 'text';
+      titleInput.value = side.title || '';
+      titleInput.style.marginTop = '4px';
+      titleInput.addEventListener('input', () => { side.title = titleInput.value; });
+      titleLabel.appendChild(titleInput);
+
+      const limitLabel = h('label', null, 'Срок годности, дней (0 — не проверять)');
+      const limitInput = h('input', 'num');
+      limitInput.type = 'text';
+      limitInput.value = String(side.limitDays == null ? '' : side.limitDays);
+      limitInput.style.marginTop = '4px';
+      limitInput.addEventListener('input', () => { side.limitDays = parseNumber(limitInput.value); });
+      limitLabel.appendChild(limitInput);
+      row.append(titleLabel, limitLabel);
+      body.appendChild(row);
+
+      const siteLabel = h('label', null, 'Адреса, где показывать (по одной маске в строке, * — любой кусок)');
+      siteLabel.style.cssText = 'display: block; font-size: 12px; color: #5b6273; margin-top: 12px;';
+      const siteArea = h('textarea', 'small');
+      siteArea.spellcheck = false;
+      siteArea.value = side.site || '';
+      siteArea.placeholder = 'example.com/orders/*';
+      siteArea.style.marginTop = '4px';
+      siteArea.addEventListener('input', () => { side.site = siteArea.value; });
+      siteLabel.appendChild(siteArea);
+      const here = h('button', null, 'Подставить текущий адрес');
+      here.style.marginTop = '6px';
+      here.addEventListener('click', () => {
+        const mask = location.host + location.pathname.replace(/\/[^/]*$/, '/') + '*';
+        siteArea.value = (siteArea.value.trim() ? siteArea.value.trim() + '\n' : '') + mask;
+        side.site = siteArea.value;
+      });
+      siteLabel.appendChild(here);
+      body.appendChild(siteLabel);
+
+      const list = h('div');
+      list.style.marginTop = '14px';
+      body.appendChild(list);
+
+      const preview = () => {
+        Array.prototype.forEach.call(list.querySelectorAll('.pval'), (node, index) => {
+          const result = extractField(side.fields[index], side.fields);
+          node.textContent = 'Сейчас: ' + (result.value || '— на этой странице не найдено');
+        });
+        count.textContent = 'Строк в панели: ' + side.fields.length;
+      };
+
+      const renderFields = () => {
+        list.textContent = '';
+        side.fields.forEach((field, index) => {
+          const card = h('div', 'pfield');
+
+          const line1 = h('div', 'line');
+          const name = h('input');
+          name.type = 'text';
+          name.value = field.label || '';
+          name.placeholder = 'Название строки';
+          name.addEventListener('input', () => { field.label = name.value; });
+
+          const source = h('select');
+          [['label', 'по подписи'], ['css', 'по селектору'], ['between', 'разница дат']].forEach((pair) => {
+            const option = h('option', null, pair[1]);
+            option.value = pair[0];
+            source.appendChild(option);
+          });
+          source.value = field.source || 'label';
+          source.addEventListener('change', () => { field.source = source.value; renderFields(); });
+
+          const del = h('button', 'icon', '✕');
+          del.title = 'Удалить строку';
+          del.addEventListener('click', () => { side.fields.splice(index, 1); renderFields(); });
+          line1.append(name, source, h('span', 'spacer'), del);
+          card.appendChild(line1);
+
+          const line2 = h('div', 'line');
+          if (field.source === 'between') {
+            const names = side.fields.filter((other) => other !== field && other.label).map((other) => other.label);
+            const build = (value, onChange) => {
+              const select = h('select');
+              names.concat(['__now__']).forEach((option) => {
+                const node = h('option', null, option === '__now__' ? 'сейчас' : option);
+                node.value = option;
+                select.appendChild(node);
+              });
+              select.value = value || names[0] || '__now__';
+              select.addEventListener('change', () => { onChange(select.value); preview(); });
+              return select;
+            };
+            line2.append(
+              h('span', 'pval', 'от'), build(field.from, (value) => { field.from = value; }),
+              h('span', 'pval', 'до'), build(field.to, (value) => { field.to = value; })
+            );
+          } else if (field.source === 'css') {
+            const selector = h('input');
+            selector.type = 'text';
+            selector.value = field.selector || '';
+            selector.placeholder = '.order .executor';
+            selector.addEventListener('input', () => { field.selector = selector.value; preview(); });
+            const pick = h('button', null, 'Указать');
+            pick.title = 'Кликните нужный элемент на странице';
+            pick.addEventListener('click', () => pickElement((path) => {
+              if (!path) return;
+              selector.value = path;
+              field.selector = path;
+              preview();
+            }));
+            const mode = h('select');
+            FIELD_MODES.forEach((pair) => {
+              const option = h('option', null, pair[1]);
+              option.value = pair[0];
+              mode.appendChild(option);
+            });
+            mode.value = field.mode || 'text';
+            mode.addEventListener('change', () => { field.mode = mode.value; preview(); });
+            line2.append(selector, pick, mode);
+          } else {
+            const query = h('input');
+            query.type = 'text';
+            query.value = field.query || '';
+            query.placeholder = 'Дата загрузки';
+            query.addEventListener('input', () => { field.query = query.value; preview(); });
+            const pick = h('button', null, 'Указать');
+            pick.title = 'Кликните подпись строки на странице';
+            pick.addEventListener('click', () => pickElement((path, el) => {
+              if (!el) return;
+              const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().replace(/[:：]$/, '');
+              query.value = text;
+              field.query = text;
+              preview();
+            }));
+            line2.append(query, pick);
+          }
+          card.appendChild(line2);
+
+          const line3 = h('div', 'line');
+          line3.appendChild(h('span', 'pval', ''));
+          card.appendChild(line3);
+          list.appendChild(card);
+        });
+        preview();
+      };
+
+      const add = h('button', 'add', '+ Добавить строку');
+      add.style.marginTop = '4px';
+      add.addEventListener('click', () => {
+        side.fields.push({ label: '', source: 'label', query: '', selector: '', attr: '', regex: '', mode: 'text' });
+        renderFields();
+      });
+
+      renderFields();
+      body.appendChild(add);
+    }
+
     function renderOpts() {
       cards = [];
       const row = h('div', 'row');
@@ -1294,9 +1528,11 @@
       body.textContent = '';
       tabList.setAttribute('aria-selected', String(active === 'list'));
       tabText.setAttribute('aria-selected', String(active === 'text'));
+      tabPanel.setAttribute('aria-selected', String(active === 'panel'));
       tabOpts.setAttribute('aria-selected', String(active === 'opts'));
       if (active === 'list') renderList();
       else if (active === 'text') renderText();
+      else if (active === 'panel') renderPanelTab();
       else renderOpts();
     }
 
@@ -1306,9 +1542,15 @@
 
     tabList.addEventListener('click', () => show('list'));
     tabText.addEventListener('click', () => show('text'));
+    tabPanel.addEventListener('click', () => show('panel'));
     tabOpts.addEventListener('click', () => show('opts'));
 
     resetBtn.addEventListener('click', () => {
+      if (active === 'panel') {
+        side.fields = JSON.parse(JSON.stringify(DEFAULT_PANEL.fields));
+        render();
+        return;
+      }
       draft.length = 0;
       parseTemplates(DEFAULT_TEXT).items.forEach((item) => draft.push({
         hotkey: item.hotkey, trigger: item.trigger, label: item.labelRaw, text: item.text, send: item.send
@@ -1336,13 +1578,15 @@
         pickerHotkey: picker,
         settingsHotkey: settings,
         toasts: opts.toasts,
-        fab: opts.fab
+        fab: opts.fab,
+        panel: side
       });
       hotkeyCache.clear();
       reloadTemplates();
       const saved = saveConfig(config);
       closeOverlay();
       ensureFab();
+      updateSidePanel();
 
       const skipped = draft.length - templates.length;
       let message = saved ? 'Сохранено, автоответов: ' + templates.length
@@ -1368,7 +1612,7 @@
     search.placeholder = 'Поиск автоответа…';
     const gear = h('button', 'icon', '⚙');
     gear.title = 'Настроить автоответы';
-    gear.addEventListener('click', openSettings);
+    gear.addEventListener('click', () => openSettings());
     head.append(search, gear);
     panel.appendChild(head);
 
@@ -1459,13 +1703,398 @@
     setTimeout(() => search.focus(), 0);
   }
 
-  // ========================== 11. СТАРТ ==========================
+  // ========================== 11. ПАНЕЛЬ ДАННЫХ НА СТРАНИЦЕ ==========================
+
+  const FIELD_MODES = [
+    ['text', 'Текст'],
+    ['count', 'Количество'],
+    ['sum', 'Сумма'],
+    ['list', 'Список']
+  ];
+
+  function escapeRegExp(str) {
+    return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
+    return String(value).replace(/[^\w-]/g, '\\$&');
+  }
+
+  /** Подходит ли адрес страницы под маски (по одной в строке, * — любой кусок). */
+  function siteMatches(patterns) {
+    const list = String(patterns || '').split('\n').map((s) => s.trim()).filter(Boolean);
+    if (!list.length) return false;
+    const url = location.href;
+    const short = url.replace(/^https?:\/\//, '');
+    return list.some((pattern) => {
+      if (pattern.indexOf('*') === -1) return url.indexOf(pattern) !== -1;
+      const re = new RegExp('^' + pattern.split('*').map(escapeRegExp).join('.*') + '$');
+      return re.test(url) || re.test(short) || re.test(short.replace(/\/$/, ''));
+    });
+  }
+
+  function parseNumber(text) {
+    const cleaned = String(text).replace(/[^\d,.\-]/g, '').replace(/\s/g, '').replace(',', '.');
+    const value = parseFloat(cleaned);
+    return isFinite(value) ? value : 0;
+  }
+
+  const RU_MONTHS = [
+    ['январ', 0], ['феврал', 1], ['март', 2], ['апрел', 3], ['мая', 4], ['май', 4], ['июн', 5],
+    ['июл', 6], ['август', 7], ['сентябр', 8], ['октябр', 9], ['ноябр', 10], ['декабр', 11]
+  ];
+
+  /** Разбирает «11 сентября 2026 г. 12:46», «11.09.2026 12:46» и ISO-даты. */
+  function parseDate(text) {
+    const value = String(text || '').replace(/\u00a0/g, ' ').trim();
+    if (!value) return null;
+
+    let m = /(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{1,2}):(\d{2}))?/.exec(value);
+    if (m) return new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0));
+
+    m = /(\d{1,2})\s+([А-Яа-яЁё]+)\.?\s+(\d{4})(?:\s*г\.?)?(?:[^\d]*(\d{1,2}):(\d{2}))?/.exec(value);
+    if (m) {
+      const month = RU_MONTHS.find((pair) => m[2].toLowerCase().indexOf(pair[0]) === 0);
+      if (month) return new Date(+m[3], month[1], +m[1], +(m[4] || 0), +(m[5] || 0));
+    }
+
+    m = /(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{4})(?:[^\d]*(\d{1,2}):(\d{2}))?/.exec(value);
+    if (m) return new Date(+m[3], +m[2] - 1, +m[1], +(m[4] || 0), +(m[5] || 0));
+
+    return null;
+  }
+
+  /** «2 д 3 ч», «45 мин» — насколько давно это было. */
+  function formatSpan(ms) {
+    const minutes = Math.round(ms / 60000);
+    const abs = Math.abs(minutes);
+    const days = Math.floor(abs / 1440);
+    const hours = Math.floor((abs % 1440) / 60);
+    const rest = abs % 60;
+    const parts = [];
+    if (days) parts.push(days + ' д');
+    if (hours) parts.push(hours + ' ч');
+    if (!days && rest) parts.push(rest + ' мин');
+    return (minutes < 0 ? '−' : '') + (parts.join(' ') || '0 мин');
+  }
+
+  const VALUE_TAGS = { TD: 1, TH: 1, DD: 1, DT: 1, SPAN: 1, DIV: 1, P: 1, B: 1, STRONG: 1, A: 1 };
+
+  /** Значение из строки «подпись → значение»: ищем подпись и берём соседнюю ячейку. */
+  function valueByLabel(query) {
+    const needle = String(query || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!needle) return '';
+    const nodes = document.querySelectorAll('th, td, dt, dd, span, div, p, b, strong, label');
+
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      const own = (node.innerText || node.textContent || '').replace(/\s+/g, ' ').trim();
+      if (own.toLowerCase().replace(/[:：]\s*$/, '') !== needle) continue;
+
+      const candidates = [];
+      if (node.nextElementSibling) candidates.push(node.nextElementSibling);
+      if (node.parentElement && node.parentElement.nextElementSibling) {
+        candidates.push(node.parentElement.nextElementSibling);
+      }
+      const row = node.closest && node.closest('tr');
+      if (row) {
+        const cells = Array.prototype.slice.call(row.children);
+        const index = cells.indexOf(node.tagName === 'TD' || node.tagName === 'TH' ? node : node.closest('td, th'));
+        if (index !== -1 && cells[index + 1]) candidates.push(cells[index + 1]);
+      }
+
+      for (let j = 0; j < candidates.length; j++) {
+        const text = (candidates[j].innerText || candidates[j].textContent || '').replace(/\s+/g, ' ').trim();
+        if (text && text.toLowerCase() !== needle) return text;
+      }
+    }
+    return '';
+  }
+
+  /** Значение одного поля панели. Возвращает { value, alarm }. */
+  function extractField(field, allFields) {
+    if (!field) return { value: '' };
+
+    if (field.source === 'between') {
+      const read = (name) => {
+        if (name === '__now__') return new Date();
+        const other = (allFields || []).find((item) => item !== field && item.label === name);
+        return other ? parseDate(extractField(other, allFields).value) : null;
+      };
+      const from = read(field.from);
+      const to = read(field.to);
+      if (!from || !to) return { value: '' };
+      const span = to.getTime() - from.getTime();
+      const limit = Number(panelConfig().limitDays) || 0;
+      return { value: formatSpan(span), alarm: limit > 0 && span > limit * 86400000 };
+    }
+
+    let nodes;
+    if (field.source === 'label') {
+      const value = valueByLabel(field.query);
+      return { value: applyRegex(value, field.regex) };
+    }
+
+    const selector = String(field.selector || '').trim();
+    if (!selector) return { value: '' };
+    try {
+      nodes = Array.prototype.slice.call(document.querySelectorAll(selector));
+    } catch (e) {
+      return { value: '⚠ селектор не понят' };
+    }
+    if (!nodes.length) return { value: '' };
+
+    const values = nodes.map((node) => {
+      const raw = field.attr
+        ? (node.getAttribute(field.attr) || '')
+        : (node.innerText || node.textContent || '');
+      return applyRegex(raw.replace(/\s+/g, ' ').trim(), field.regex);
+    }).filter((value) => value !== '');
+
+    if (values.indexOf('⚠ регулярка не понята') !== -1) return { value: '⚠ регулярка не понята' };
+    if (field.mode === 'count') return { value: String(nodes.length) };
+    if (field.mode === 'sum') {
+      const sum = values.reduce((acc, value) => acc + parseNumber(value), 0);
+      return { value: String(Math.round(sum * 100) / 100) };
+    }
+    if (field.mode === 'list') return { value: values.join(', ') };
+    return { value: values[0] || '' };
+  }
+
+  function applyRegex(value, pattern) {
+    if (!pattern) return value;
+    try {
+      const found = new RegExp(pattern).exec(value);
+      return found ? (found[1] !== undefined ? found[1] : found[0]) : '';
+    } catch (e) {
+      return '⚠ регулярка не понята';
+    }
+  }
+
+  // ---------- Сама панель ----------
+
+  let sideObserver = null;
+  let sideTimer = null;
+
+  function panelConfig() {
+    return Object.assign({}, DEFAULT_PANEL, config.panel || {});
+  }
+
+  function panelVisible() {
+    const panel = panelConfig();
+    return window.top === window.self && !!panel.enabled && siteMatches(panel.site);
+  }
+
+  function updateSidePanel() {
+    const root = rootEl || (panelVisible() ? ensureRoot() : null);
+    const existing = root && root.querySelector('.side');
+    if (!panelVisible()) {
+      if (existing) existing.remove();
+      stopWatchingPage();
+      return;
+    }
+    if (!existing) buildSidePanel();
+    fillSidePanel();
+    startWatchingPage();
+  }
+
+  function buildSidePanel() {
+    const root = ensureRoot();
+    const panel = panelConfig();
+    const side = h('aside', 'side');
+
+    const head = h('div', 'side-head');
+    const title = h('b', 'side-title', panel.title || 'Данные заказа');
+    const reload = h('button', 'icon', '⟳');
+    reload.title = 'Обновить';
+    reload.addEventListener('click', fillSidePanel);
+    const gear = h('button', 'icon', '⚙');
+    gear.title = 'Настроить поля';
+    gear.addEventListener('click', () => openSettings('panel'));
+    const fold = h('button', 'icon', '–');
+    fold.title = 'Свернуть';
+    fold.addEventListener('click', () => {
+      config.panel = Object.assign({}, panelConfig(), { collapsed: !panelConfig().collapsed });
+      saveConfig(config);
+      side.classList.toggle('folded', !!config.panel.collapsed);
+      fold.textContent = config.panel.collapsed ? '+' : '–';
+    });
+    head.append(title, h('span', 'spacer'), reload, gear, fold);
+
+    const body = h('div', 'side-body');
+    side.append(head, body);
+    side.classList.toggle('folded', !!panel.collapsed);
+    fold.textContent = panel.collapsed ? '+' : '–';
+    root.appendChild(side);
+  }
+
+  /** Перечитывает значения со страницы и обновляет строки панели. */
+  function fillSidePanel() {
+    const root = rootEl;
+    const side = root && root.querySelector('.side');
+    if (!side) return;
+    const panel = panelConfig();
+    const body = side.querySelector('.side-body');
+    const title = side.querySelector('.side-title');
+    if (title) title.textContent = panel.title || 'Данные заказа';
+    body.textContent = '';
+
+    const fields = (panel.fields || []).filter((field) => field && (field.label || field.query || field.selector));
+    if (!fields.length) {
+      body.appendChild(h('div', 'side-empty', 'Поля не настроены — нажмите ⚙'));
+      return;
+    }
+
+    fields.forEach((field) => {
+      const result = extractField(field, fields);
+      const value = result.value;
+      const row = h('div', 'side-row' + (result.alarm ? ' side-alarm' : ''));
+      row.append(
+        h('span', 'side-label', field.label || field.query || field.selector),
+        h('span', 'side-value' + (value ? '' : ' side-dim'), value || '—')
+      );
+      if (value) {
+        row.title = 'Нажмите, чтобы скопировать';
+        row.addEventListener('click', () => {
+          try {
+            navigator.clipboard.writeText(value);
+            toast('Скопировано: ' + value.slice(0, 40));
+          } catch (e) {
+            toast('Не удалось скопировать');
+          }
+        });
+      }
+      body.appendChild(row);
+    });
+  }
+
+  function startWatchingPage() {
+    if (sideObserver || !document.body) return;
+    sideObserver = new MutationObserver(() => {
+      clearTimeout(sideTimer);
+      sideTimer = setTimeout(fillSidePanel, 400);          // страница часто дёргается — ждём паузу
+    });
+    sideObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+  }
+
+  function stopWatchingPage() {
+    if (!sideObserver) return;
+    sideObserver.disconnect();
+    sideObserver = null;
+    clearTimeout(sideTimer);
+  }
+
+  /** Одностраничные приложения меняют адрес без перезагрузки — следим за этим. */
+  function watchUrlChanges(onChange) {
+    const fire = () => setTimeout(onChange, 60);
+    ['pushState', 'replaceState'].forEach((name) => {
+      const original = history[name];
+      if (typeof original !== 'function' || original.arhPatched) return;
+      const patched = function () {
+        const result = original.apply(this, arguments);
+        fire();
+        return result;
+      };
+      patched.arhPatched = true;
+      history[name] = patched;
+    });
+    window.addEventListener('popstate', fire);
+    window.addEventListener('hashchange', fire);
+  }
+
+  // ---------- Выбор элемента мышью ----------
+
+  /** Короткий и по возможности устойчивый селектор для элемента. */
+  function cssPath(el) {
+    if (!el || el.nodeType !== 1) return '';
+    const unique = (selector) => {
+      try { return document.querySelectorAll(selector).length === 1; } catch (e) { return false; }
+    };
+    if (el.id && unique('#' + cssEscape(el.id))) return '#' + cssEscape(el.id);
+
+    const parts = [];
+    let node = el;
+    while (node && node.nodeType === 1 && parts.length < 6) {
+      if (node.id && unique('#' + cssEscape(node.id))) {
+        parts.unshift('#' + cssEscape(node.id));
+        break;
+      }
+      let part = node.tagName.toLowerCase();
+      const classes = Array.prototype.slice.call(node.classList || [])
+        .filter((name) => /^[a-zA-Z][\w-]*$/.test(name))
+        .slice(0, 2);
+      if (classes.length) part += '.' + classes.map(cssEscape).join('.');
+      const parent = node.parentElement;
+      if (parent) {
+        const sameTag = Array.prototype.slice.call(parent.children)
+          .filter((child) => child.tagName === node.tagName);
+        if (sameTag.length > 1) part += ':nth-of-type(' + (sameTag.indexOf(node) + 1) + ')';
+      }
+      parts.unshift(part);
+      const candidate = parts.join(' > ');
+      if (unique(candidate)) return candidate;
+      node = parent;
+    }
+    return parts.join(' > ');
+  }
+
+  /** Режим «ткни в элемент»: подсвечивает элементы под курсором и возвращает селектор. */
+  function pickElement(onPick) {
+    const root = ensureRoot();
+    const hidden = openOverlay;
+    if (hidden) hidden.style.display = 'none';
+
+    const box = h('div', 'pick-box');
+    const bar = h('div', 'pick-bar', 'Кликните нужный элемент на странице · Esc — отмена');
+    root.append(box, bar);
+
+    let current = null;
+    const move = (e) => {
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      if (!el || el === hostEl || el === document.documentElement) return;
+      current = el;
+      const rect = el.getBoundingClientRect();
+      box.style.left = rect.left + 'px';
+      box.style.top = rect.top + 'px';
+      box.style.width = rect.width + 'px';
+      box.style.height = rect.height + 'px';
+    };
+    const click = (e) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      finish(current);
+    };
+    const key = (e) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      finish(null);
+    };
+    function finish(el) {
+      document.removeEventListener('mousemove', move, true);
+      document.removeEventListener('click', click, true);
+      document.removeEventListener('keydown', key, true);
+      box.remove();
+      bar.remove();
+      if (hidden) hidden.style.display = '';
+      onPick(el ? cssPath(el) : null, el);
+    }
+
+    document.addEventListener('mousemove', move, true);
+    document.addEventListener('click', click, true);
+    document.addEventListener('keydown', key, true);
+  }
+
+  // ========================== 12. СТАРТ ==========================
 
   reloadTemplates();
   ensureFab();
+  updateSidePanel();
+  if (window.top === window.self) watchUrlChanges(updateSidePanel);
 
   if (window.top === window.self && typeof GM_registerMenuCommand === 'function') {
-    GM_registerMenuCommand('Настроить автоответы', openSettings);
-    GM_registerMenuCommand('Показать список автоответов', openPicker);
+    GM_registerMenuCommand('Настроить автоответы', () => openSettings());
+    GM_registerMenuCommand('Показать список автоответов', () => openPicker());
   }
 })();
