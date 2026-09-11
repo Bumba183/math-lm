@@ -2,9 +2,9 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      1.1.0
-// @description  Заготовленные автоответы вставляются в активное поле ввода по нажатию своей комбинации клавиш. Работает с input, textarea и contenteditable (чаты, соцсети, тикет-системы, CRM).
-// @description:en  Insert canned replies into the focused input field with a hotkey.
+// @version      1.2.0
+// @description  Заготовленные автоответы вставляются в поле ввода: напечатайте короткий триггер вроде !1 или нажмите свою комбинацию клавиш. Работает с input, textarea и contenteditable (чаты, соцсети, тикет-системы, CRM).
+// @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
 // @license      MIT
 // @match        *://*/*
@@ -27,26 +27,28 @@
   // Автоответы «из коробки». Их можно полностью заменить в настройках
   // (меню Tampermonkey → «Настроить автоответы» или Ctrl+Alt+0).
   const DEFAULT_TEXT = [
-    '# Формат: [комбинация | название | send]',
+    '# Формат: [триггер, комбинация | название | send]',
+    '# Триггер — текст, который вы печатаете прямо в поле: напечатали !1 — он заменился ответом.',
+    '# Комбинация — горячие клавиши. Можно задать только одно из двух.',
     '# Строки ниже заголовка — текст автоответа (можно несколько строк).',
     '# Флаг send = вставить и сразу нажать Enter (работает не на всех сайтах).',
     '# Подстановки: {cursor} {selection} {clipboard} {date} {time} {datetime} {url} {title} {ask:Вопрос}',
     '',
-    '[Ctrl+Alt+1 | Приветствие]',
+    '[!1, Ctrl+Alt+1 | Приветствие]',
     'Здравствуйте! Спасибо за обращение — уже смотрю ваш вопрос.',
     '',
-    '[Ctrl+Alt+2 | Просьба подождать]',
+    '[!2, Ctrl+Alt+2 | Просьба подождать]',
     'Одну минуту, уточняю информацию и вернусь с ответом.',
     '',
-    '[Ctrl+Alt+3 | Готово]',
+    '[!3, Ctrl+Alt+3 | Готово]',
     'Готово ✅',
     'Если появятся вопросы — напишите, я на связи.',
     '',
-    '[Ctrl+Alt+4 | Знакомство]',
+    '[!имя, Ctrl+Alt+4 | Знакомство]',
     'Добрый день! Меня зовут {ask:Как вас представить?}, я помогу с вашим вопросом.',
     '{cursor}',
     '',
-    '[Ctrl+Alt+5 | Дата и ссылка]',
+    '[!дата, Ctrl+Alt+5 | Дата и ссылка]',
     'Актуально на {date} {time}. Страница: {url}'
   ].join('\n');
 
@@ -258,12 +260,13 @@
 
       if (header) {
         const parsed = parseHeader(header[1]);
-        if (parsed.hk) {
+        if (parsed.ok) {
           flush();
           current = {
             hk: parsed.hk,
-            hotkey: parsed.hk.display,
-            label: parsed.label || parsed.hk.display,
+            hotkey: parsed.hk ? parsed.hk.display : '',
+            trigger: parsed.trigger,
+            label: parsed.label || parsed.trigger || (parsed.hk ? parsed.hk.display : ''),
             labelRaw: parsed.label,
             send: parsed.send,
             lines: [],
@@ -291,27 +294,86 @@
     });
     flush();
 
-    // Дубликаты комбинаций: работает первая, остальные отключаем
-    const seen = new Map();
+    // Дубликаты: занятый активатор отключается, остальное у блока продолжает работать
+    const seenKeys = new Map();
+    const seenTriggers = new Map();
     const result = [];
     for (const item of items) {
-      if (seen.has(item.hk.sig)) {
+      if (item.hk && seenKeys.has(item.hk.sig)) {
         notes.push('Комбинация ' + item.hotkey + ' уже занята автоответом «' +
-          seen.get(item.hk.sig).label + '» — блок в строке ' + item.line + ' не работает.');
+          seenKeys.get(item.hk.sig).label + '» — в строке ' + item.line + ' она не работает.');
+        item.hk = null;
+        item.hotkey = '';
+      }
+      if (item.trigger && seenTriggers.has(item.trigger.toLowerCase())) {
+        notes.push('Триггер ' + item.trigger + ' уже занят автоответом «' +
+          seenTriggers.get(item.trigger.toLowerCase()).label + '» — в строке ' + item.line + ' он не работает.');
+        item.trigger = '';
+      }
+      if (!item.hk && !item.trigger) {
+        notes.push('У блока в строке ' + item.line + ' не осталось ни триггера, ни комбинации — он пропущен.');
         continue;
       }
-      seen.set(item.hk.sig, item);
+      if (item.hk) seenKeys.set(item.hk.sig, item);
+      if (item.trigger) seenTriggers.set(item.trigger.toLowerCase(), item);
       result.push(item);
     }
+
+    // Более короткий триггер срабатывает раньше, чем успеешь дописать длинный
+    result.forEach((item) => {
+      if (!item.trigger) return;
+      const shorter = result.find((other) => other !== item && other.trigger &&
+        other.trigger.length < item.trigger.length &&
+        item.trigger.toLowerCase().startsWith(other.trigger.toLowerCase()));
+      if (shorter) {
+        notes.push('Триггер ' + item.trigger + ' не сработает: ' + shorter.trigger +
+          ' короче и срабатывает раньше.');
+      }
+    });
 
     return { items: result, notes: notes };
   }
 
+  const MAX_TRIGGER = 32;
+  const LOOKS_LIKE_HOTKEY = /^(ctrl|control|ctl|alt|option|opt|shift|cmd|command|meta|win|super|ктрл|контрол|альт|шифт|мета)\s*\+/i;
+
+  /** Проверяет текст-триггер вроде «!1». Возвращает ошибку или пустую строку. */
+  function triggerError(trigger) {
+    if (/[,|[\]{}]/.test(trigger)) return 'в триггере нельзя использовать « , » « | » и скобки';
+    if (/\s/.test(trigger)) return 'в триггере нельзя использовать пробелы';
+    if (trigger.length < 2) return 'триггер короче двух символов срабатывал бы слишком часто';
+    if (trigger.length > MAX_TRIGGER) return 'триггер длиннее ' + MAX_TRIGGER + ' символов';
+    return '';
+  }
+
+  /**
+   * Заголовок блока: [триггер, комбинация | название | send].
+   * Активаторы перечисляются через запятую, порядок не важен; можно указать
+   * только один из них. Явные префиксы text: и key: снимают любую неоднозначность.
+   */
   function parseHeader(inner) {
     const parts = String(inner).split('|').map((s) => s.trim());
-    const hotkeyPart = parts.shift() || '';
-    const parsed = parseHotkey(hotkeyPart);
-    if (!parsed.hk) return { error: parsed.error };
+    const activators = (parts.shift() || '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (!activators.length) return { error: 'не указан ни текст-триггер, ни комбинация' };
+
+    let hk = null;
+    let trigger = '';
+    for (const activator of activators) {
+      const asText = /^text\s*:/i.test(activator);
+      const asKey = /^key\s*:/i.test(activator);
+      const value = activator.replace(/^(text|key)\s*:\s*/i, '');
+
+      if (asText || (!asKey && !LOOKS_LIKE_HOTKEY.test(value) && !parseHotkey(value).hk)) {
+        const error = triggerError(value);
+        if (error) return { error: 'триггер «' + value + '»: ' + error };
+        if (!trigger) trigger = value;
+        continue;
+      }
+      const parsed = parseHotkey(value);
+      if (!parsed.hk) return { error: parsed.error };
+      if (!hk) hk = parsed.hk;
+    }
+
     let label = '';
     let send = false;
     for (const part of parts) {
@@ -320,13 +382,14 @@
       if (low === 'send' || low === 'отправить' || low === 'enter') { send = true; continue; }
       label = part.replace(/^name\s*[=:]\s*/i, '');
     }
-    return { hk: parsed.hk, label: label, send: send };
+    return { ok: true, hk: hk, trigger: trigger, label: label, send: send };
   }
 
   /** Собирает текст настроек из списка автоответов — обратная операция к parseTemplates. */
   function serializeTemplates(items) {
     const blocks = items.map((item) => {
-      const head = ['[' + String(item.hotkey || '').trim()];
+      const activators = [String(item.trigger || '').trim(), String(item.hotkey || '').trim()].filter(Boolean);
+      const head = ['[' + activators.join(', ')];
       const label = String(item.label || '').replace(/[|\]]/g, ' ').trim();
       if (label) head.push(label);
       if (item.send) head.push('send');
@@ -364,7 +427,7 @@
 
   function isEditable(el) {
     if (!el || el.nodeType !== 1 || el.disabled || el.readOnly) return false;
-    if (hostEl && hostEl.contains(el)) return false;          // наши собственные поля не считаются
+    if (rootEl && el.getRootNode && el.getRootNode() === rootEl) return false;   // поля нашей панели не считаются
     const tag = el.tagName;
     if (tag === 'TEXTAREA') return true;
     if (tag === 'INPUT') return /^(|text|search|url|email|tel|password|number)$/i.test(el.type || '');
@@ -520,9 +583,9 @@
     return sel ? String(sel) : '';
   }
 
-  async function expandPlaceholders(text, el) {
+  async function expandPlaceholders(text, el, selectionOverride) {
     const now = new Date();
-    const sel = selectedText(el);
+    const sel = selectionOverride == null ? selectedText(el) : selectionOverride;
     let out = String(text).replace(/\{курсор\}/gi, CURSOR);
     let cancelled = false;
 
@@ -555,13 +618,13 @@
 
   // ========================== 8. ПРИМЕНЕНИЕ АВТООТВЕТА ==========================
 
-  async function applyTemplate(item, target) {
+  async function applyTemplate(item, target, options) {
     const el = target || resolveTarget();
     if (!el) {
       toast('Нет активного поля ввода — поставьте курсор в поле и повторите');
       return;
     }
-    const text = await expandPlaceholders(item.text, el);
+    const text = await expandPlaceholders(item.text, el, options && options.selectionText);
     if (text === null) return;                       // пользователь отменил {ask:...}
 
     const ok = insertTemplateText(el, text);
@@ -602,13 +665,82 @@
       return;
     }
 
-    const item = templates.find((t) => sigs.indexOf(t.hk.sig) !== -1);
+    const item = templates.find((t) => t.hk && sigs.indexOf(t.hk.sig) !== -1);
     if (!item) return;
     e.preventDefault();
     e.stopImmediatePropagation();
     const target = resolveTarget();
     applyTemplate(item, target);
   }, true);
+
+  // ---------- Текст-триггеры: напечатали «!1» — он превратился в автоответ ----------
+
+  let expanding = false;   // защита от повторного срабатывания на собственной вставке
+
+  document.addEventListener('input', (e) => {
+    if (expanding || e.isComposing) return;
+    const el = (e.composedPath && e.composedPath()[0]) || e.target;
+    if (!isEditable(el)) return;
+    const tail = textBeforeCaret(el);
+    if (!tail) return;
+    const item = findTrigger(tail);
+    if (item) expandTrigger(el, item);
+  }, true);
+
+  /** Текст непосредственно перед курсором — в нём ищем триггер. */
+  function textBeforeCaret(el) {
+    if (el.value !== undefined) {
+      const start = el.selectionStart;
+      if (typeof start !== 'number' || el.selectionEnd !== start) return '';
+      return el.value.slice(Math.max(0, start - MAX_TRIGGER), start);
+    }
+    const sel = window.getSelection();
+    if (!sel || !sel.isCollapsed || !sel.anchorNode || sel.anchorNode.nodeType !== 3) return '';
+    return sel.anchorNode.textContent.slice(Math.max(0, sel.anchorOffset - MAX_TRIGGER), sel.anchorOffset);
+  }
+
+  const WORD_CHAR = /[0-9A-Za-zА-Яа-яЁё_]/;
+
+  /** Самый длинный триггер, которым заканчивается набранный текст. */
+  function findTrigger(tail) {
+    const lower = tail.toLowerCase();
+    let best = null;
+    for (const item of templates) {
+      if (!item.trigger) continue;
+      const trigger = item.trigger.toLowerCase();
+      if (lower.length < trigger.length || lower.slice(-trigger.length) !== trigger) continue;
+      if (WORD_CHAR.test(item.trigger[0])) {
+        // Триггер из букв или цифр срабатывает только с начала слова, а не внутри него
+        const before = tail.slice(0, tail.length - trigger.length).slice(-1);
+        if (before && WORD_CHAR.test(before)) continue;
+      }
+      if (!best || item.trigger.length > best.trigger.length) best = item;
+    }
+    return best;
+  }
+
+  /** Выделяет напечатанный триггер и заменяет его текстом автоответа. */
+  function expandTrigger(el, item) {
+    const length = item.trigger.length;
+    if (el.value !== undefined) {
+      const end = el.selectionStart;
+      if (end < length) return;
+      try { el.setSelectionRange(end - length, end); } catch (err) { return; }
+    } else {
+      const sel = window.getSelection();
+      if (!sel || !sel.anchorNode || sel.anchorOffset < length) return;
+      const range = document.createRange();
+      try {
+        range.setStart(sel.anchorNode, sel.anchorOffset - length);
+        range.setEnd(sel.anchorNode, sel.anchorOffset);
+      } catch (err) { return; }
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+    expanding = true;
+    const done = () => { expanding = false; };
+    Promise.resolve(applyTemplate(item, el, { selectionText: '' })).then(done, done);
+  }
 
   const hotkeyCache = new Map();
   function matches(hotkeyStr, sigs) {
@@ -664,8 +796,11 @@
     '.card { border: 1px solid #e6e8ee; border-radius: 10px; padding: 10px; margin-bottom: 10px; }',
     '.card.bad { border-color: #e5a3a3; }',
     '.card-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }',
-    '.card-top .hk { width: 148px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }',
-    '.card-top .name { flex: 1 1 160px; width: auto; }',
+    '.card-top .trg, .card-top .hk { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }',
+    '.card-top .trg { width: 92px; }',
+    '.card-top .hk { width: 146px; }',
+    '.card-top .name { flex: 1 1 130px; width: auto; }',
+    '.list .keys { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: flex-end; }',
     '.card textarea { min-height: 76px; font-size: 13px; }',
     '.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }',
     '.chip { padding: 2px 8px; border-radius: 999px; font-size: 11px;',
@@ -887,7 +1022,7 @@
 
     // рабочая копия: изменения применяются только по «Сохранить»
     const draft = parseTemplates(config.text).items.map((item) => ({
-      hotkey: item.hotkey, label: item.labelRaw, text: item.text, send: item.send
+      hotkey: item.hotkey, trigger: item.trigger, label: item.labelRaw, text: item.text, send: item.send
     }));
     const opts = {
       pickerHotkey: config.pickerHotkey,
@@ -921,14 +1056,34 @@
     let rawArea = null;
     let cards = [];
 
-    /** Ошибки по каждому автоответу: разбор комбинации, дубликаты, пустой текст. */
+    /** Ошибки по каждому автоответу: триггер, комбинация, дубликаты, пустой текст. */
     const validate = () => {
-      const seen = new Map();
+      const triggers = draft.map((item) => String(item.trigger || '').trim());
+      const seenKeys = new Map();
+      const seenTriggers = new Map();
       return draft.map((item, index) => {
-        const parsed = parseHotkey(item.hotkey || '');
-        if (!parsed.hk) return 'Комбинация: ' + (parsed.error || 'не распознана');
-        if (seen.has(parsed.hk.sig)) return 'Эта комбинация уже занята автоответом №' + (seen.get(parsed.hk.sig) + 1);
-        seen.set(parsed.hk.sig, index);
+        const trigger = triggers[index];
+        const hotkey = String(item.hotkey || '').trim();
+        if (!trigger && !hotkey) return 'Задайте триггер (например !1) или комбинацию';
+
+        if (trigger) {
+          const error = triggerError(trigger);
+          if (error) return 'Триггер: ' + error;
+          const low = trigger.toLowerCase();
+          if (seenTriggers.has(low)) return 'Такой триггер уже есть у автоответа №' + (seenTriggers.get(low) + 1);
+          seenTriggers.set(low, index);
+          const shorter = triggers.findIndex((other, i) => i !== index && other &&
+            other.length < trigger.length && low.startsWith(other.toLowerCase()));
+          if (shorter !== -1) return 'Не сработает: триггер ' + triggers[shorter] + ' короче и срабатывает раньше';
+        }
+
+        if (hotkey) {
+          const parsed = parseHotkey(hotkey);
+          if (!parsed.hk) return 'Комбинация: ' + (parsed.error || 'не распознана');
+          if (seenKeys.has(parsed.hk.sig)) return 'Эта комбинация уже занята автоответом №' + (seenKeys.get(parsed.hk.sig) + 1);
+          seenKeys.set(parsed.hk.sig, index);
+        }
+
         if (!String(item.text || '').trim()) return 'Пустой текст — автоответ не сохранится';
         return '';
       });
@@ -949,7 +1104,7 @@
       const parsed = parseTemplates(rawArea.value).items;
       draft.length = 0;
       parsed.forEach((item) => draft.push({
-        hotkey: item.hotkey, label: item.labelRaw, text: item.text, send: item.send
+        hotkey: item.hotkey, trigger: item.trigger, label: item.labelRaw, text: item.text, send: item.send
       }));
     };
 
@@ -962,6 +1117,13 @@
     function renderCard(item, index) {
       const el = h('div', 'card');
       const top = h('div', 'card-top');
+
+      const trig = h('input', 'trg');
+      trig.type = 'text';
+      trig.value = item.trigger || '';
+      trig.placeholder = '!1';
+      trig.title = 'Текст-триггер: печатаете его в поле — он превращается в автоответ';
+      trig.addEventListener('input', () => { item.trigger = trig.value.trim(); refresh(); });
 
       const hk = hotkeyField(item.hotkey, (value) => { item.hotkey = value; refresh(); });
       const name = h('input', 'name');
@@ -1000,7 +1162,7 @@
         render();
       });
 
-      top.append(hk.wrap, name, sendLabel, h('span', 'spacer'), up, down, del);
+      top.append(trig, hk.wrap, name, sendLabel, h('span', 'spacer'), up, down, del);
 
       const area = h('textarea');
       area.value = item.text || '';
@@ -1027,15 +1189,17 @@
 
       const err = h('div', 'err');
       el.append(top, area, chips, err);
-      cards.push({ el: el, err: err, hotkey: hk.input, text: area });
+      cards.push({ el: el, err: err, trigger: trig, hotkey: hk.input, text: area });
       return el;
     }
 
     function renderList() {
       cards = [];
       const hint = h('p', 'hint');
-      hint.textContent = 'Комбинацию можно вписать руками или нажать ⌨ и нажать нужные клавиши. ' +
-        'Enter — отправлять сообщение сразу после вставки. Плашки под текстом вставляют подстановки.';
+      hint.innerHTML = 'Первое поле — <b>триггер</b>: печатаете его прямо в поле ввода (например <code>!1</code>), ' +
+        'и он заменяется автоответом. Второе — <b>комбинация клавиш</b>: впишите или нажмите ⌨ и нажмите клавиши. ' +
+        'Достаточно чего-то одного. Enter — отправлять сообщение сразу после вставки, ' +
+        'плашки под текстом вставляют подстановки.';
       body.appendChild(hint);
 
       if (!draft.length) {
@@ -1045,10 +1209,10 @@
 
       const add = h('button', 'add', '+ Добавить автоответ');
       add.addEventListener('click', () => {
-        draft.push({ hotkey: '', label: '', text: '', send: false });
+        draft.push({ hotkey: '', trigger: '', label: '', text: '', send: false });
         render();
         const last = cards[cards.length - 1];
-        if (last) last.hotkey.focus();
+        if (last) last.trigger.focus();
       });
       body.appendChild(add);
       refresh();
@@ -1058,8 +1222,8 @@
       cards = [];
       const hint = h('p', 'hint');
       hint.innerHTML = 'Тот же список текстом — удобно скопировать целиком или вставить готовый набор. ' +
-        'Блок: <code>[комбинация | название | send]</code>, ниже — строки ответа. ' +
-        'Строки с <code>#</code> — комментарии.';
+        'Блок: <code>[триггер, комбинация | название | send]</code>, ниже — строки ответа. ' +
+        'Триггер или комбинацию можно не указывать. Строки с <code>#</code> — комментарии.';
       body.appendChild(hint);
 
       rawArea = h('textarea');
@@ -1147,7 +1311,7 @@
     resetBtn.addEventListener('click', () => {
       draft.length = 0;
       parseTemplates(DEFAULT_TEXT).items.forEach((item) => draft.push({
-        hotkey: item.hotkey, label: item.labelRaw, text: item.text, send: item.send
+        hotkey: item.hotkey, trigger: item.trigger, label: item.labelRaw, text: item.text, send: item.send
       }));
       if (active === 'opts') active = 'list';
       render();
@@ -1240,6 +1404,7 @@
       shown = templates.filter((t) => !query ||
         t.label.toLowerCase().includes(query) ||
         t.text.toLowerCase().includes(query) ||
+        t.trigger.toLowerCase().includes(query) ||
         t.hotkey.toLowerCase().includes(query));
       if (cursor >= shown.length) cursor = Math.max(0, shown.length - 1);
       list.textContent = '';
@@ -1261,7 +1426,10 @@
           h('div', 'label', item.label + (item.send ? ' ⏎' : '')),
           h('div', 'preview', item.text.replace(/\s+/g, ' ').slice(0, 120))
         );
-        li.append(num, text, h('kbd', null, item.hotkey));
+        const keys = h('span', 'keys');
+        if (item.trigger) keys.appendChild(h('span', 'chip', item.trigger));
+        if (item.hotkey) keys.appendChild(h('kbd', null, item.hotkey));
+        li.append(num, text, keys);
         li.addEventListener('mouseenter', () => { cursor = index; markSelection(); });
         li.addEventListener('click', () => choose(index));
         list.appendChild(li);
