@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      1.4.0
+// @version      1.5.0
 // @description  Автоответы по текстовому триггеру вроде !1 или по горячим клавишам, плюс боковая панель со сведениями о заказе (покупатель, исполнитель, дата загрузки и покупки, сколько товар пролежал).
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -67,8 +67,15 @@
       { label: 'Дата покупки', source: 'label', query: 'Дата создания заказа', selector: '', attr: '', regex: '', mode: 'text' },
       { label: 'Пролежал до покупки', source: 'between', from: 'Дата загрузки', to: 'Дата покупки' },
       { label: 'Прошло с загрузки', source: 'between', from: 'Дата загрузки', to: '__now__' },
-      { label: 'Заказов всего', source: 'count', linkSelector: '', rowSelector: '', whereSelector: '', whereText: '', usePacks: false },
-      { label: 'Заказов с тикетом', source: 'count', linkSelector: '', rowSelector: '', whereSelector: '', whereText: '', usePacks: true }
+      { label: 'Заказов всего', source: 'count', table: 'Последние заказы', column: '', value: '', exclude: false,
+        linkSelector: '', rowSelector: '', whereSelector: '', whereText: '', usePacks: false },
+      { label: 'Выполненных', source: 'count', table: 'Последние заказы', column: 'Статус', value: 'Выполнен',
+        exclude: false, linkSelector: '', rowSelector: '', whereSelector: '', whereText: '', usePacks: false },
+      { label: 'Тикетов', source: 'count', table: 'Тикеты пользователя', column: '', value: '', exclude: false,
+        linkSelector: '', rowSelector: '', whereSelector: '', whereText: '', usePacks: false },
+      { label: 'Тикетов по заказам', source: 'count', table: 'Тикеты пользователя', column: 'Тип',
+        value: 'Вопросы по заказу', exclude: false, linkSelector: '', rowSelector: '', whereSelector: '',
+        whereText: '', usePacks: false }
     ]
   };
 
@@ -885,6 +892,7 @@
     'textarea.small { min-height: 66px; }',
     'input.num { width: 78px; flex: 0 0 auto; }',
     '.pval { font-size: 12px; color: #5b6273; }',
+    '.pnow { flex: 1 1 100%; }',
     '@media (prefers-color-scheme: dark) {',
     '  .side { background: #1e222b; color: #e7e9ee; border-color: #313745; }',
     '  .side-head { border-color: #313745; }',
@@ -1475,7 +1483,7 @@
       body.appendChild(list);
 
       const preview = () => {
-        Array.prototype.forEach.call(list.querySelectorAll('.pval'), (node, index) => {
+        Array.prototype.forEach.call(list.querySelectorAll('.pnow'), (node, index) => {
           const result = extractField(side.fields[index], side.fields);
           node.textContent = 'Сейчас: ' + (result.value || '— на этой странице не найдено');
         });
@@ -1533,19 +1541,33 @@
               return button;
             };
 
-            const rows = textInput(field.rowSelector, 'строка списка: tr.order', (v) => { field.rowSelector = v; });
-            line2.append(h('span', 'pval', 'что считаем'), rows, pickInto(rows, (v) => { field.rowSelector = v; }));
+            const table = textInput(field.table, 'таблица: Последние заказы', (v) => { field.table = v; });
+            const rows = textInput(field.rowSelector, 'или строки: tr.order', (v) => { field.rowSelector = v; });
+            line2.append(h('span', 'pval', 'что считаем'), table, rows, pickInto(rows, (v) => { field.rowSelector = v; }));
+
+            const lineFilter = h('div', 'line');
+            const column = textInput(field.column, 'колонка: Статус', (v) => { field.column = v; });
+            column.style.flex = '0 1 140px';
+            const wanted = textInput(field.value, 'значения через запятую', (v) => { field.value = v; });
+            const exclude = h('label', 'check');
+            exclude.style.marginTop = '0';
+            const excludeBox = h('input');
+            excludeBox.type = 'checkbox';
+            excludeBox.checked = !!field.exclude;
+            excludeBox.addEventListener('change', () => { field.exclude = excludeBox.checked; preview(); });
+            exclude.append(excludeBox, document.createTextNode('исключать'));
+            lineFilter.append(h('span', 'pval', 'фильтр'), column, wanted, exclude);
 
             const lineFrom = h('div', 'line');
             const link = textInput(field.linkSelector, 'ссылка на список, если он на другой странице',
               (v) => { field.linkSelector = v; });
             lineFrom.append(h('span', 'pval', 'откуда'), link, pickInto(link, (v) => { field.linkSelector = v; }, true));
-            extraLines.push(lineFrom);
+            extraLines.push(lineFrom, lineFilter);
 
             const lineIf = h('div', 'line');
             const where = textInput(field.whereSelector, 'признак тикета: .ticket', (v) => { field.whereSelector = v; });
             const whereText = textInput(field.whereText, 'или текст в строке', (v) => { field.whereText = v; });
-            lineIf.append(h('span', 'pval', 'считать строку, если есть'), where,
+            lineIf.append(h('span', 'pval', 'ещё в строке есть'), where,
               pickInto(where, (v) => { field.whereSelector = v; }), whereText);
             extraLines.push(lineIf);
 
@@ -1620,7 +1642,7 @@
           extraLines.forEach((line) => card.appendChild(line));
 
           const line3 = h('div', 'line');
-          line3.appendChild(h('span', 'pval', ''));
+          line3.appendChild(h('span', 'pval pnow', ''));
           card.appendChild(line3);
           list.appendChild(card);
         });
@@ -2042,17 +2064,28 @@
     }
 
     if (field.source === 'count') {
-      if (!field.rowSelector) return { value: '' };
+      if (!field.table && !field.rowSelector) return { value: '' };
       const scope = countScope(field);
       if (typeof scope === 'string') return { value: scope };
       if (!scope) return { value: '' };
 
-      let rows;
-      try {
-        rows = Array.prototype.slice.call(scope.querySelectorAll(field.rowSelector));
-      } catch (e) {
-        return { value: '⚠ селектор строк не понят' };
+      let rows = [];
+      let table = null;
+      if (field.table) {
+        table = findTableByHeading(scope, field.table);
+        if (!table) return { value: '' };
+        rows = dataRows(table);
+      } else {
+        try {
+          rows = Array.prototype.slice.call(scope.querySelectorAll(field.rowSelector));
+        } catch (e) {
+          return { value: '⚠ селектор строк не понят' };
+        }
       }
+
+      // фильтр по колонке: «Статус = Выполнен», «Тип = Вопросы по заказу» и т. п.
+      const column = table && field.column ? columnIndex(table, field.column) : -1;
+      const wanted = String(field.value || '').split(',').map(normalizeText).filter(Boolean);
 
       const packs = panelConfig().packs || {};
       const counted = (packs.counted || []).map(normalizeText);
@@ -2061,6 +2094,12 @@
 
       let total = 0;
       rows.forEach((row) => {
+        if (column !== -1 && wanted.length) {
+          const cell = row.cells && row.cells[column];
+          const text = normalizeText(cell ? cell.textContent : '');
+          const hit = wanted.some((value) => text.indexOf(value) !== -1);
+          if (field.exclude ? hit : !hit) return;
+        }
         if (field.whereSelector) {
           let hit = null;
           try { hit = row.querySelector(field.whereSelector); } catch (e) { return; }
@@ -2253,6 +2292,63 @@
     });
     window.addEventListener('popstate', fire);
     window.addEventListener('hashchange', fire);
+  }
+
+  /** Ближайшая таблица после заголовка вроде «Последние заказы». */
+  function nextTable(node) {
+    let el = node;
+    while (el) {
+      let sibling = el.nextElementSibling;
+      while (sibling) {
+        if (sibling.tagName === 'TABLE') return sibling;
+        const inner = sibling.querySelector && sibling.querySelector('table');
+        if (inner) return inner;
+        sibling = sibling.nextElementSibling;
+      }
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  function findTableByHeading(doc, title) {
+    const needle = normalizeText(title);
+    if (!needle) return null;
+
+    const tables = Array.prototype.slice.call(doc.querySelectorAll('table'));
+    for (let i = 0; i < tables.length; i++) {
+      const caption = tables[i].querySelector('caption');
+      if (caption && normalizeText(caption.textContent) === needle) return tables[i];
+    }
+
+    const headings = doc.querySelectorAll('h1, h2, h3, h4, h5, legend, summary, div, span, p, td, th');
+    for (let i = 0; i < headings.length; i++) {
+      if (normalizeText(headings[i].textContent) !== needle) continue;
+      const table = nextTable(headings[i]);
+      if (table) return table;
+    }
+    return null;
+  }
+
+  /** Номер колонки по её заголовку; -1, если такой нет. */
+  function columnIndex(table, name) {
+    const needle = normalizeText(name).replace(/[:：]$/, '');
+    if (!needle) return -1;
+    const rows = Array.prototype.slice.call(table.rows || []);
+    for (let r = 0; r < Math.min(rows.length, 3); r++) {
+      const cells = Array.prototype.slice.call(rows[r].cells || []);
+      for (let i = 0; i < cells.length; i++) {
+        if (normalizeText(cells[i].textContent).replace(/[:：]$/, '') === needle) return i;
+      }
+    }
+    return -1;
+  }
+
+  /** Строки таблицы без строки заголовков. */
+  function dataRows(table) {
+    return Array.prototype.slice.call(table.rows || []).filter((row) => {
+      const cells = Array.prototype.slice.call(row.cells || []);
+      return cells.length > 0 && !cells.every((cell) => cell.tagName === 'TH');
+    });
   }
 
   /** Значения колонки таблицы по заголовку — например колонки «Товар». */
