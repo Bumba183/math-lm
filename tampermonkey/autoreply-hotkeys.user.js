@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      1.0.0
+// @version      1.1.0
 // @description  Заготовленные автоответы вставляются в активное поле ввода по нажатию своей комбинации клавиш. Работает с input, textarea и contenteditable (чаты, соцсети, тикет-системы, CRM).
 // @description:en  Insert canned replies into the focused input field with a hotkey.
 // @author       -
@@ -54,7 +54,9 @@
     text: DEFAULT_TEXT,
     pickerHotkey: 'Ctrl+Alt+Space',    // палитра со списком всех автоответов
     settingsHotkey: 'Ctrl+Alt+0',      // окно настроек
-    toasts: true                       // всплывающие подсказки
+    toasts: true,                      // всплывающие подсказки
+    fab: true,                         // круглая кнопка на странице
+    fabPos: null                       // её положение, если пользователь перетащил
   };
 
   // ========================== 2. ХРАНИЛИЩЕ ==========================
@@ -262,6 +264,7 @@
             hk: parsed.hk,
             hotkey: parsed.hk.display,
             label: parsed.label || parsed.hk.display,
+            labelRaw: parsed.label,
             send: parsed.send,
             lines: [],
             line: lineNo,
@@ -318,6 +321,22 @@
       label = part.replace(/^name\s*[=:]\s*/i, '');
     }
     return { hk: parsed.hk, label: label, send: send };
+  }
+
+  /** Собирает текст настроек из списка автоответов — обратная операция к parseTemplates. */
+  function serializeTemplates(items) {
+    const blocks = items.map((item) => {
+      const head = ['[' + String(item.hotkey || '').trim()];
+      const label = String(item.label || '').replace(/[|\]]/g, ' ').trim();
+      if (label) head.push(label);
+      if (item.send) head.push('send');
+      const body = String(item.text == null ? '' : item.text).replace(/\r\n?/g, '\n')
+        .split('\n')
+        .map((line) => line.replace(/^(\s*)\[/, '$1\\['))   // строка ответа, начатая с «[», экранируется
+        .join('\n');
+      return head.join(' | ') + ']\n' + body;
+    });
+    return blocks.join('\n\n') + (blocks.length ? '\n' : '');
   }
 
   function trimBlankEdges(arr) {
@@ -558,13 +577,13 @@
 
   document.addEventListener('keydown', (e) => {
     if (e.isComposing || e.repeat) return;                       // IME и автоповтор игнорируем
-    if (openOverlay && e.key === 'Escape') {                      // Esc закрывает наши окна из любого фокуса
+    if (openOverlay && e.key === 'Escape' && !capturingHotkey) {  // Esc закрывает наши окна из любого фокуса
       e.preventDefault();
       e.stopImmediatePropagation();
       closeOverlay();
       return;
     }
-    if (hostEl && e.composedPath && e.composedPath().indexOf(hostEl) !== -1) return; // внутри нашего UI
+    if (openOverlay && e.composedPath && e.composedPath().indexOf(openOverlay) !== -1) return; // печатают в нашей панели
     if (!e.ctrlKey && !e.altKey && !e.metaKey && !SAFE_ALONE.test(e.code || '')) return;
 
     const sigs = eventSignatures(e);
@@ -606,34 +625,58 @@
 
   let hostEl = null;
   let rootEl = null;
+  let capturingHotkey = false;   // идёт запись комбинации: Esc в это время не закрывает окно
+
+  function h(tag, className, text) {
+    const el = document.createElement(tag);
+    if (className) el.className = className;
+    if (text != null) el.textContent = text;
+    return el;
+  }
 
   const CSS = [
     ':host { all: initial; }',
     '* { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }',
     '.overlay { position: fixed; inset: 0; display: flex; align-items: flex-start; justify-content: center;',
-    '  padding: 8vh 16px 24px; background: rgba(14, 17, 24, .45); font-size: 14px; line-height: 1.45; color: #1b1f27; }',
-    '.panel { width: min(720px, 100%); max-height: 82vh; display: flex; flex-direction: column; overflow: hidden;',
+    '  padding: 6vh 16px 24px; background: rgba(14, 17, 24, .45); font-size: 14px; line-height: 1.45; color: #1b1f27; }',
+    '.panel { width: min(760px, 100%); max-height: 88vh; display: flex; flex-direction: column; overflow: hidden;',
     '  background: #fff; border-radius: 12px; box-shadow: 0 20px 60px rgba(0, 0, 0, .38); }',
-    '.head { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid #e6e8ee; }',
-    '.head h2 { margin: 0; font-size: 15px; font-weight: 600; flex: 1; }',
+    '.head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid #e6e8ee; }',
+    '.head h2 { margin: 0; font-size: 15px; font-weight: 600; }',
     '.body { padding: 14px 16px; overflow: auto; }',
     '.foot { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 12px 16px; border-top: 1px solid #e6e8ee; }',
-    '.foot .spacer { flex: 1; }',
+    '.spacer { flex: 1; }',
     'button { padding: 7px 13px; border-radius: 8px; border: 1px solid #ccd1dc; background: #f5f6f9; color: inherit;',
     '  font-size: 13px; cursor: pointer; }',
     'button:hover { background: #eceef4; }',
     'button.primary { background: #2f6df6; border-color: #2f6df6; color: #fff; }',
     'button.primary:hover { background: #275fdd; }',
     'button.icon { padding: 5px 9px; }',
+    'button.armed { background: #2f6df6; border-color: #2f6df6; color: #fff; }',
+    'button:focus-visible { outline: 2px solid #2f6df6; outline-offset: 2px; }',
     'textarea, input[type="text"] { width: 100%; padding: 9px 10px; border: 1px solid #ccd1dc; border-radius: 8px;',
     '  background: #fff; color: inherit; font-size: 13px; }',
     'textarea { min-height: 34vh; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }',
     'textarea:focus, input[type="text"]:focus { outline: 2px solid #2f6df6; outline-offset: 1px; border-color: #2f6df6; }',
-    'button:focus-visible { outline: 2px solid #2f6df6; outline-offset: 2px; }',
-    '.row { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; }',
-    '.row label { flex: 1 1 200px; font-size: 12px; color: #5b6273; }',
-    '.row label input { margin-top: 4px; }',
-    '.check { display: flex; align-items: center; gap: 7px; font-size: 13px; color: inherit; }',
+    '.tabs { display: flex; gap: 4px; flex: 1; }',
+    '.tab { border-color: transparent; background: transparent; }',
+    '.tab[aria-selected="true"] { background: #eaf0ff; border-color: #c7d7ff; color: #2149a8; font-weight: 600; }',
+    '.card { border: 1px solid #e6e8ee; border-radius: 10px; padding: 10px; margin-bottom: 10px; }',
+    '.card.bad { border-color: #e5a3a3; }',
+    '.card-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }',
+    '.card-top .hk { width: 148px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }',
+    '.card-top .name { flex: 1 1 160px; width: auto; }',
+    '.card textarea { min-height: 76px; font-size: 13px; }',
+    '.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }',
+    '.chip { padding: 2px 8px; border-radius: 999px; font-size: 11px;',
+    '  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }',
+    '.err { margin-top: 6px; font-size: 12px; color: #b3261e; }',
+    '.add { width: 100%; }',
+    '.row { display: flex; flex-wrap: wrap; gap: 12px; }',
+    '.row label { flex: 1 1 220px; font-size: 12px; color: #5b6273; }',
+    '.field { display: flex; gap: 6px; align-items: center; }',
+    '.row .field { margin-top: 4px; }',
+    '.check { display: flex; align-items: center; gap: 7px; font-size: 13px; color: inherit; margin-top: 14px; }',
     '.hint { margin: 0 0 10px; font-size: 12px; color: #5b6273; }',
     '.hint code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: #eef0f5;',
     '  padding: 1px 4px; border-radius: 4px; }',
@@ -647,23 +690,33 @@
     '.list .text { flex: 1; min-width: 0; }',
     '.list .label { font-weight: 600; }',
     '.list .preview { color: #5b6273; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }',
+    'kbd, .chip { border: 1px solid #ccd1dc; background: #f5f6f9; }',
     'kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; white-space: nowrap;',
-    '  border: 1px solid #ccd1dc; border-bottom-width: 2px; border-radius: 6px; padding: 2px 6px; background: #f5f6f9; }',
+    '  border-bottom-width: 2px; border-radius: 6px; padding: 2px 6px; }',
     '.empty { padding: 18px 4px; color: #5b6273; text-align: center; }',
-    '.toast { position: fixed; right: 16px; bottom: 16px; max-width: 320px; padding: 10px 13px; border-radius: 10px;',
+    '.toast { position: fixed; right: 16px; bottom: 76px; max-width: 320px; padding: 10px 13px; border-radius: 10px;',
     '  background: #1b1f27; color: #fff; font-size: 13px; box-shadow: 0 10px 30px rgba(0, 0, 0, .3); }',
+    '.fab { position: fixed; right: 18px; bottom: 18px; width: 46px; height: 46px; padding: 0; border-radius: 50%;',
+    '  border: none; background: #2f6df6; color: #fff; font-size: 20px; line-height: 46px; cursor: pointer;',
+    '  box-shadow: 0 6px 18px rgba(0, 0, 0, .28); touch-action: none; user-select: none; }',
+    '.fab:hover { background: #275fdd; }',
     '@media (prefers-color-scheme: dark) {',
     '  .overlay { color: #e7e9ee; }',
     '  .panel { background: #1e222b; }',
     '  .head, .foot { border-color: #313745; }',
     '  button { background: #2a3040; border-color: #3c4354; }',
     '  button:hover { background: #333b4d; }',
+    '  .tab { background: transparent; border-color: transparent; }',
+    '  .tab[aria-selected="true"] { background: #2b3550; border-color: #3f4d73; color: #cfe0ff; }',
     '  textarea, input[type="text"] { background: #171b22; border-color: #3c4354; color: #e7e9ee; }',
+    '  .card { border-color: #313745; }',
+    '  .card.bad { border-color: #7d4040; }',
     '  .hint, .row label, .list .preview, .list .num, .empty { color: #a3abbd; }',
     '  .hint code { background: #2a3040; }',
     '  .notes { background: #3a2f16; color: #f0d9a8; }',
     '  .list li[aria-selected="true"] { background: #2b3550; }',
-    '  kbd { background: #2a3040; border-color: #3c4354; }',
+    '  kbd, .chip { background: #2a3040; border-color: #3c4354; }',
+    '  .err { color: #ff9a90; }',
     '}'
   ].join('\n');
 
@@ -686,17 +739,14 @@
       openOverlay.remove();
       openOverlay = null;
     }
+    capturingHotkey = false;
   }
 
   function createOverlay() {
     const root = ensureRoot();
     closeOverlay();
-    const overlay = document.createElement('div');
-    overlay.className = 'overlay';
+    const overlay = h('div', 'overlay');
     overlay.addEventListener('mousedown', (e) => { if (e.target === overlay) closeOverlay(); });
-    overlay.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeOverlay(); }
-    });
     root.appendChild(overlay);
     openOverlay = overlay;
     return overlay;
@@ -708,8 +758,7 @@
     const root = ensureRoot();
     let el = root.querySelector('.toast');
     if (!el) {
-      el = document.createElement('div');
-      el.className = 'toast';
+      el = h('div', 'toast');
       root.appendChild(el);
     }
     el.textContent = message;
@@ -717,143 +766,428 @@
     toastTimer = setTimeout(() => el.remove(), 2600);
   }
 
+  // ---------- Кнопка на странице ----------
+
+  function placeFab(fab, x, y) {
+    const size = 46;
+    const maxX = Math.max(6, window.innerWidth - size - 6);
+    const maxY = Math.max(6, window.innerHeight - size - 6);
+    fab.style.left = Math.min(Math.max(6, x), maxX) + 'px';
+    fab.style.top = Math.min(Math.max(6, y), maxY) + 'px';
+    fab.style.right = 'auto';
+    fab.style.bottom = 'auto';
+  }
+
+  function ensureFab() {
+    if (window.top !== window.self) return;              // во фреймах кнопку не дублируем
+    if (!config.fab) {
+      const existing = rootEl && rootEl.querySelector('.fab');
+      if (existing) existing.remove();
+      return;
+    }
+    const root = ensureRoot();
+    let fab = root.querySelector('.fab');
+    if (!fab) {
+      fab = h('button', 'fab', '💬');
+      root.appendChild(fab);
+
+      let drag = null;
+      fab.addEventListener('pointerdown', (e) => {
+        const rect = fab.getBoundingClientRect();
+        drag = { x: e.clientX, y: e.clientY, left: rect.left, top: rect.top, moved: false };
+        try { fab.setPointerCapture(e.pointerId); } catch (err) {}
+      });
+      fab.addEventListener('pointermove', (e) => {
+        if (!drag) return;
+        const dx = e.clientX - drag.x;
+        const dy = e.clientY - drag.y;
+        if (!drag.moved && Math.abs(dx) + Math.abs(dy) < 5) return;
+        drag.moved = true;
+        placeFab(fab, drag.left + dx, drag.top + dy);
+      });
+      fab.addEventListener('pointerup', (e) => {
+        if (!drag) return;
+        const moved = drag.moved;
+        drag = null;
+        try { fab.releasePointerCapture(e.pointerId); } catch (err) {}
+        if (!moved) { openPicker(); return; }
+        const rect = fab.getBoundingClientRect();
+        config.fabPos = { x: Math.round(rect.left), y: Math.round(rect.top) };
+        saveConfig(config);
+      });
+      fab.addEventListener('pointercancel', () => { drag = null; });
+      fab.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); });
+      fab.addEventListener('mousedown', (e) => e.preventDefault());   // фокус остаётся в поле ввода страницы
+      window.addEventListener('resize', () => {
+        if (config.fab && config.fabPos) placeFab(fab, config.fabPos.x, config.fabPos.y);
+      });
+    }
+    fab.title = 'Автоответы' + (config.pickerHotkey ? ' (' + config.pickerHotkey + ')' : '');
+    if (config.fabPos) placeFab(fab, config.fabPos.x, config.fabPos.y);
+  }
+
+  // ---------- Запись комбинации с клавиатуры ----------
+
+  function attachCapture(input, button) {
+    const disarm = () => {
+      capturingHotkey = false;
+      button.classList.remove('armed');
+      button.textContent = '⌨';
+    };
+    button.textContent = '⌨';
+    button.title = 'Нажать комбинацию';
+    button.addEventListener('click', () => {
+      if (button.classList.contains('armed')) { disarm(); return; }
+      capturingHotkey = true;
+      button.classList.add('armed');
+      button.textContent = '…';
+      input.focus();
+    });
+    input.addEventListener('keydown', (e) => {
+      if (!button.classList.contains('armed')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const code = e.code || '';
+      if (!code || /^(Control|Alt|Shift|Meta|OS)(Left|Right)?$/.test(code)) return;   // ждём основную клавишу
+      if (code === 'Escape') { disarm(); return; }
+      const parts = [];
+      if (e.ctrlKey) parts.push('Ctrl');
+      if (e.altKey) parts.push('Alt');
+      if (e.shiftKey) parts.push('Shift');
+      if (e.metaKey) parts.push('Cmd');
+      parts.push(prettyCode(code));
+      input.value = parts.join('+');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      disarm();
+    });
+    input.addEventListener('blur', disarm);
+  }
+
+  function hotkeyField(value, onChange) {
+    const wrap = h('span', 'field');
+    const input = h('input', 'hk');
+    input.type = 'text';
+    input.value = value || '';
+    input.placeholder = 'Ctrl+Alt+1';
+    const rec = h('button', 'icon');
+    attachCapture(input, rec);
+    input.addEventListener('input', () => onChange(input.value));
+    wrap.append(input, rec);
+    return { wrap: wrap, input: input };
+  }
+
   // ---------- Настройки ----------
+
+  const PLACEHOLDERS = ['{cursor}', '{selection}', '{clipboard}', '{date}', '{time}', '{url}', '{title}', '{ask:Вопрос}'];
 
   function openSettings() {
     const overlay = createOverlay();
-    const panel = document.createElement('div');
-    panel.className = 'panel';
+    const panel = h('div', 'panel');
     overlay.appendChild(panel);
 
-    const head = document.createElement('div');
-    head.className = 'head';
-    const title = document.createElement('h2');
-    title.textContent = 'Автоответы: настройка';
-    head.appendChild(title);
+    // рабочая копия: изменения применяются только по «Сохранить»
+    const draft = parseTemplates(config.text).items.map((item) => ({
+      hotkey: item.hotkey, label: item.labelRaw, text: item.text, send: item.send
+    }));
+    const opts = {
+      pickerHotkey: config.pickerHotkey,
+      settingsHotkey: config.settingsHotkey,
+      toasts: !!config.toasts,
+      fab: !!config.fab
+    };
+
+    const head = h('div', 'head');
+    const tabs = h('div', 'tabs');
+    const tabList = h('button', 'tab', 'Автоответы');
+    const tabText = h('button', 'tab', 'Текстом');
+    const tabOpts = h('button', 'tab', 'Настройки');
+    tabs.append(tabList, tabText, tabOpts);
+    head.append(tabs);
     panel.appendChild(head);
 
-    const body = document.createElement('div');
-    body.className = 'body';
-    const hint = document.createElement('p');
-    hint.className = 'hint';
-    hint.innerHTML = 'Каждый автоответ — блок <code>[комбинация | название | send]</code> и строки текста под ним. ' +
-      'Флаг <code>send</code> нажимает Enter после вставки. Подстановки: <code>{cursor}</code>, ' +
-      '<code>{selection}</code>, <code>{clipboard}</code>, <code>{date}</code>, <code>{time}</code>, ' +
-      '<code>{datetime}</code>, <code>{url}</code>, <code>{title}</code>, <code>{ask:Вопрос}</code>. ' +
-      'Строки с <code>#</code> — комментарии.';
-    body.appendChild(hint);
-
-    const area = document.createElement('textarea');
-    area.spellcheck = false;
-    area.value = config.text;
-    body.appendChild(area);
-
-    const row = document.createElement('div');
-    row.className = 'row';
-    const pickerLabel = document.createElement('label');
-    pickerLabel.textContent = 'Комбинация для списка автоответов';
-    const pickerInput = document.createElement('input');
-    pickerInput.type = 'text';
-    pickerInput.value = config.pickerHotkey;
-    pickerLabel.appendChild(pickerInput);
-    const settingsLabel = document.createElement('label');
-    settingsLabel.textContent = 'Комбинация для этого окна';
-    const settingsInput = document.createElement('input');
-    settingsInput.type = 'text';
-    settingsInput.value = config.settingsHotkey;
-    settingsLabel.appendChild(settingsInput);
-    row.appendChild(pickerLabel);
-    row.appendChild(settingsLabel);
-    body.appendChild(row);
-
-    const toastRow = document.createElement('label');
-    toastRow.className = 'check';
-    toastRow.style.marginTop = '12px';
-    const toastBox = document.createElement('input');
-    toastBox.type = 'checkbox';
-    toastBox.checked = !!config.toasts;
-    toastRow.appendChild(toastBox);
-    toastRow.appendChild(document.createTextNode('Показывать всплывающие подсказки'));
-    body.appendChild(toastRow);
-
-    const notes = document.createElement('div');
-    notes.className = 'notes';
-    notes.hidden = true;
-    body.appendChild(notes);
+    const body = h('div', 'body');
     panel.appendChild(body);
 
-    const foot = document.createElement('div');
-    foot.className = 'foot';
-    const count = document.createElement('span');
-    count.className = 'hint';
+    const foot = h('div', 'foot');
+    const count = h('span', 'hint');
     count.style.margin = '0';
-    foot.appendChild(count);
-    const spacer = document.createElement('span');
-    spacer.className = 'spacer';
-    foot.appendChild(spacer);
-
-    const resetBtn = document.createElement('button');
-    resetBtn.textContent = 'Вернуть примеры';
-    const cancelBtn = document.createElement('button');
-    cancelBtn.textContent = 'Отмена';
-    const saveBtn = document.createElement('button');
-    saveBtn.className = 'primary';
-    saveBtn.textContent = 'Сохранить';
-    foot.appendChild(resetBtn);
-    foot.appendChild(cancelBtn);
-    foot.appendChild(saveBtn);
+    const resetBtn = h('button', null, 'Вернуть примеры');
+    const cancelBtn = h('button', null, 'Отмена');
+    const saveBtn = h('button', 'primary', 'Сохранить');
+    foot.append(count, h('span', 'spacer'), resetBtn, cancelBtn, saveBtn);
     panel.appendChild(foot);
 
-    const preview = () => {
-      const parsed = parseTemplates(area.value);
-      count.textContent = 'Автоответов: ' + parsed.items.length;
-      notes.hidden = parsed.notes.length === 0;
-      notes.textContent = '';
-      parsed.notes.forEach((note) => {
-        const line = document.createElement('div');
-        line.textContent = note;
-        notes.appendChild(line);
+    let active = 'list';
+    let rawArea = null;
+    let cards = [];
+
+    /** Ошибки по каждому автоответу: разбор комбинации, дубликаты, пустой текст. */
+    const validate = () => {
+      const seen = new Map();
+      return draft.map((item, index) => {
+        const parsed = parseHotkey(item.hotkey || '');
+        if (!parsed.hk) return 'Комбинация: ' + (parsed.error || 'не распознана');
+        if (seen.has(parsed.hk.sig)) return 'Эта комбинация уже занята автоответом №' + (seen.get(parsed.hk.sig) + 1);
+        seen.set(parsed.hk.sig, index);
+        if (!String(item.text || '').trim()) return 'Пустой текст — автоответ не сохранится';
+        return '';
       });
     };
-    area.addEventListener('input', preview);
-    preview();
 
-    resetBtn.addEventListener('click', () => { area.value = DEFAULT_TEXT; preview(); });
+    const refresh = () => {
+      const errors = validate();
+      const bad = errors.filter(Boolean).length;
+      count.textContent = 'Автоответов: ' + draft.length + (bad ? ', с ошибками: ' + bad : '');
+      cards.forEach((card, index) => {
+        card.err.textContent = errors[index] || '';
+        card.el.classList.toggle('bad', !!errors[index]);
+      });
+    };
+
+    const syncFromRaw = () => {
+      if (active !== 'text' || !rawArea) return;
+      const parsed = parseTemplates(rawArea.value).items;
+      draft.length = 0;
+      parsed.forEach((item) => draft.push({
+        hotkey: item.hotkey, label: item.labelRaw, text: item.text, send: item.send
+      }));
+    };
+
+    const show = (next) => {
+      syncFromRaw();
+      active = next;
+      render();
+    };
+
+    function renderCard(item, index) {
+      const el = h('div', 'card');
+      const top = h('div', 'card-top');
+
+      const hk = hotkeyField(item.hotkey, (value) => { item.hotkey = value; refresh(); });
+      const name = h('input', 'name');
+      name.type = 'text';
+      name.value = item.label || '';
+      name.placeholder = 'Название (необязательно)';
+      name.addEventListener('input', () => { item.label = name.value; });
+
+      const sendLabel = h('label', 'check');
+      sendLabel.style.marginTop = '0';
+      sendLabel.title = 'Нажать Enter сразу после вставки';
+      const sendBox = h('input');
+      sendBox.type = 'checkbox';
+      sendBox.checked = !!item.send;
+      sendBox.addEventListener('change', () => { item.send = sendBox.checked; });
+      sendLabel.append(sendBox, document.createTextNode('Enter'));
+
+      const up = h('button', 'icon up', '↑');
+      up.title = 'Выше';
+      up.addEventListener('click', () => {
+        if (index === 0) return;
+        draft.splice(index - 1, 0, draft.splice(index, 1)[0]);
+        render();
+      });
+      const down = h('button', 'icon down', '↓');
+      down.title = 'Ниже';
+      down.addEventListener('click', () => {
+        if (index === draft.length - 1) return;
+        draft.splice(index + 1, 0, draft.splice(index, 1)[0]);
+        render();
+      });
+      const del = h('button', 'icon del', '✕');
+      del.title = 'Удалить';
+      del.addEventListener('click', () => {
+        draft.splice(index, 1);
+        render();
+      });
+
+      top.append(hk.wrap, name, sendLabel, h('span', 'spacer'), up, down, del);
+
+      const area = h('textarea');
+      area.value = item.text || '';
+      area.placeholder = 'Текст автоответа';
+      area.spellcheck = false;
+      area.addEventListener('input', () => { item.text = area.value; refresh(); });
+
+      const chips = h('div', 'chips');
+      PLACEHOLDERS.forEach((token) => {
+        const chip = h('button', 'chip', token);
+        chip.title = 'Вставить в текст';
+        chip.addEventListener('click', () => {
+          const start = typeof area.selectionStart === 'number' ? area.selectionStart : area.value.length;
+          const end = typeof area.selectionEnd === 'number' ? area.selectionEnd : start;
+          area.value = area.value.slice(0, start) + token + area.value.slice(end);
+          item.text = area.value;
+          area.focus();
+          const pos = start + token.length;
+          try { area.setSelectionRange(pos, pos); } catch (e) {}
+          refresh();
+        });
+        chips.appendChild(chip);
+      });
+
+      const err = h('div', 'err');
+      el.append(top, area, chips, err);
+      cards.push({ el: el, err: err, hotkey: hk.input, text: area });
+      return el;
+    }
+
+    function renderList() {
+      cards = [];
+      const hint = h('p', 'hint');
+      hint.textContent = 'Комбинацию можно вписать руками или нажать ⌨ и нажать нужные клавиши. ' +
+        'Enter — отправлять сообщение сразу после вставки. Плашки под текстом вставляют подстановки.';
+      body.appendChild(hint);
+
+      if (!draft.length) {
+        body.appendChild(h('div', 'empty', 'Автоответов пока нет — добавьте первый.'));
+      }
+      draft.forEach((item, index) => body.appendChild(renderCard(item, index)));
+
+      const add = h('button', 'add', '+ Добавить автоответ');
+      add.addEventListener('click', () => {
+        draft.push({ hotkey: '', label: '', text: '', send: false });
+        render();
+        const last = cards[cards.length - 1];
+        if (last) last.hotkey.focus();
+      });
+      body.appendChild(add);
+      refresh();
+    }
+
+    function renderText() {
+      cards = [];
+      const hint = h('p', 'hint');
+      hint.innerHTML = 'Тот же список текстом — удобно скопировать целиком или вставить готовый набор. ' +
+        'Блок: <code>[комбинация | название | send]</code>, ниже — строки ответа. ' +
+        'Строки с <code>#</code> — комментарии.';
+      body.appendChild(hint);
+
+      rawArea = h('textarea');
+      rawArea.spellcheck = false;
+      rawArea.value = serializeTemplates(draft);
+      body.appendChild(rawArea);
+
+      const notes = h('div', 'notes');
+      notes.hidden = true;
+      body.appendChild(notes);
+
+      const check = () => {
+        const parsed = parseTemplates(rawArea.value);
+        count.textContent = 'Автоответов: ' + parsed.items.length;
+        notes.hidden = parsed.notes.length === 0;
+        notes.textContent = '';
+        parsed.notes.forEach((note) => notes.appendChild(h('div', null, note)));
+      };
+      rawArea.addEventListener('input', check);
+      check();
+      setTimeout(() => {
+        rawArea.focus();
+        try { rawArea.setSelectionRange(0, 0); } catch (e) {}
+        rawArea.scrollTop = 0;
+      }, 0);
+    }
+
+    function renderOpts() {
+      cards = [];
+      const row = h('div', 'row');
+
+      const pickerLabel = h('label', null, 'Комбинация для списка автоответов');
+      const picker = hotkeyField(opts.pickerHotkey, (value) => { opts.pickerHotkey = value; });
+      pickerLabel.appendChild(picker.wrap);
+
+      const settingsLabel = h('label', null, 'Комбинация для этого окна');
+      const settings = hotkeyField(opts.settingsHotkey, (value) => { opts.settingsHotkey = value; });
+      settingsLabel.appendChild(settings.wrap);
+
+      row.append(pickerLabel, settingsLabel);
+      body.appendChild(row);
+
+      const fabLabel = h('label', 'check');
+      const fabBox = h('input');
+      fabBox.type = 'checkbox';
+      fabBox.checked = opts.fab;
+      fabBox.addEventListener('change', () => { opts.fab = fabBox.checked; });
+      fabLabel.append(fabBox, document.createTextNode('Показывать кнопку 💬 на странице (её можно перетащить)'));
+      body.appendChild(fabLabel);
+
+      const toastLabel = h('label', 'check');
+      const toastBox = h('input');
+      toastBox.type = 'checkbox';
+      toastBox.checked = opts.toasts;
+      toastBox.addEventListener('change', () => { opts.toasts = toastBox.checked; });
+      toastLabel.append(toastBox, document.createTextNode('Показывать всплывающие подсказки'));
+      body.appendChild(toastLabel);
+
+      const note = h('p', 'hint');
+      note.style.margin = '16px 0 0';
+      note.textContent = 'Автоответы хранятся в Tampermonkey. Чтобы перенести их в другой браузер, ' +
+        'скопируйте содержимое вкладки «Текстом».';
+      body.appendChild(note);
+      refresh();
+    }
+
+    function render() {
+      body.textContent = '';
+      tabList.setAttribute('aria-selected', String(active === 'list'));
+      tabText.setAttribute('aria-selected', String(active === 'text'));
+      tabOpts.setAttribute('aria-selected', String(active === 'opts'));
+      if (active === 'list') renderList();
+      else if (active === 'text') renderText();
+      else renderOpts();
+    }
+
+    panel.addEventListener('keydown', (e) => {                 // Ctrl+Enter — сохранить
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveBtn.click(); }
+    });
+
+    tabList.addEventListener('click', () => show('list'));
+    tabText.addEventListener('click', () => show('text'));
+    tabOpts.addEventListener('click', () => show('opts'));
+
+    resetBtn.addEventListener('click', () => {
+      draft.length = 0;
+      parseTemplates(DEFAULT_TEXT).items.forEach((item) => draft.push({
+        hotkey: item.hotkey, label: item.labelRaw, text: item.text, send: item.send
+      }));
+      if (active === 'opts') active = 'list';
+      render();
+    });
+
     cancelBtn.addEventListener('click', closeOverlay);
+
     saveBtn.addEventListener('click', () => {
-      const picker = pickerInput.value.trim();
-      const settings = settingsInput.value.trim();
-      for (const [value, name] of [[picker, 'списка автоответов'], [settings, 'окна настроек']]) {
-        if (value && !parseHotkey(value).hk) {
-          toast('Комбинация для ' + name + ' не распознана: ' + value);
+      syncFromRaw();
+      const picker = String(opts.pickerHotkey || '').trim();
+      const settings = String(opts.settingsHotkey || '').trim();
+      for (const pair of [[picker, 'списка автоответов'], [settings, 'окна настроек']]) {
+        if (pair[0] && !parseHotkey(pair[0]).hk) {
+          toast('Комбинация для ' + pair[1] + ' не распознана: ' + pair[0]);
+          show('opts');
           return;
         }
       }
+
       config = Object.assign({}, config, {
-        text: area.value,
+        text: serializeTemplates(draft),
         pickerHotkey: picker,
         settingsHotkey: settings,
-        toasts: toastBox.checked
+        toasts: opts.toasts,
+        fab: opts.fab
       });
       hotkeyCache.clear();
       reloadTemplates();
       const saved = saveConfig(config);
       closeOverlay();
-      toast(saved
-        ? 'Сохранено, автоответов: ' + templates.length
-        : 'Изменения применены, но сохранить их не удалось');
+      ensureFab();
+
+      const skipped = draft.length - templates.length;
+      let message = saved ? 'Сохранено, автоответов: ' + templates.length
+                          : 'Применено, но сохранить не удалось';
+      if (skipped > 0) message += '. Не работают: ' + skipped + ' — проверьте комбинации';
+      toast(message);
     });
 
-    // Ctrl+Enter в текстовом поле = сохранить
-    area.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveBtn.click(); }
-    });
-
-    setTimeout(() => {
-      area.focus();
-      try { area.setSelectionRange(0, 0); } catch (e) {}
-      area.scrollTop = 0;                                   // показываем начало списка, а не конец
-    }, 0);
+    render();
   }
 
   // ---------- Список автоответов ----------
@@ -861,88 +1195,32 @@
   function openPicker() {
     const target = resolveTarget();
     const overlay = createOverlay();
-    const panel = document.createElement('div');
-    panel.className = 'panel';
+    const panel = h('div', 'panel');
     overlay.appendChild(panel);
 
-    const head = document.createElement('div');
-    head.className = 'head';
-    const search = document.createElement('input');
+    const head = h('div', 'head');
+    const search = h('input');
     search.type = 'text';
     search.placeholder = 'Поиск автоответа…';
-    head.appendChild(search);
-    const gear = document.createElement('button');
-    gear.className = 'icon';
+    const gear = h('button', 'icon', '⚙');
     gear.title = 'Настроить автоответы';
-    gear.textContent = '⚙';
     gear.addEventListener('click', openSettings);
-    head.appendChild(gear);
+    head.append(search, gear);
     panel.appendChild(head);
 
-    const body = document.createElement('div');
-    body.className = 'body';
-    const list = document.createElement('ul');
-    list.className = 'list';
+    const body = h('div', 'body');
+    const list = h('ul', 'list');
     body.appendChild(list);
     panel.appendChild(body);
 
-    const foot = document.createElement('div');
-    foot.className = 'foot';
-    const tip = document.createElement('span');
-    tip.className = 'hint';
+    const foot = h('div', 'foot');
+    const tip = h('span', 'hint', '↑↓ — выбор, Enter — вставить, 1…9 — быстрый выбор, Esc — закрыть');
     tip.style.margin = '0';
-    tip.textContent = '↑↓ — выбор, Enter — вставить, 1…9 — быстрый выбор, Esc — закрыть';
     foot.appendChild(tip);
     panel.appendChild(foot);
 
     let shown = [];
     let cursor = 0;
-
-    const render = () => {
-      const query = search.value.trim().toLowerCase();
-      shown = templates.filter((t) => !query ||
-        t.label.toLowerCase().includes(query) ||
-        t.text.toLowerCase().includes(query) ||
-        t.hotkey.toLowerCase().includes(query));
-      if (cursor >= shown.length) cursor = Math.max(0, shown.length - 1);
-      list.textContent = '';
-
-      if (!shown.length) {
-        const empty = document.createElement('li');
-        empty.className = 'empty';
-        empty.textContent = templates.length
-          ? 'Ничего не найдено'
-          : 'Автоответов пока нет — откройте настройки и вставьте свои';
-        list.appendChild(empty);
-        return;
-      }
-
-      shown.forEach((item, index) => {
-        const li = document.createElement('li');
-        li.setAttribute('aria-selected', index === cursor ? 'true' : 'false');
-        const num = document.createElement('span');
-        num.className = 'num';
-        num.textContent = index < 9 ? String(index + 1) : '';
-        const text = document.createElement('span');
-        text.className = 'text';
-        const label = document.createElement('div');
-        label.className = 'label';
-        label.textContent = item.label + (item.send ? ' ⏎' : '');
-        const prev = document.createElement('div');
-        prev.className = 'preview';
-        prev.textContent = item.text.replace(/\s+/g, ' ').slice(0, 120);
-        text.appendChild(label);
-        text.appendChild(prev);
-        const key = document.createElement('kbd');
-        key.textContent = item.hotkey;
-        li.appendChild(num);
-        li.appendChild(text);
-        li.appendChild(key);
-        li.addEventListener('mouseenter', () => { cursor = index; markSelection(); });
-        li.addEventListener('click', () => choose(index));
-        list.appendChild(li);
-      });
-    };
 
     const markSelection = () => {
       Array.from(list.children).forEach((li, index) => {
@@ -955,6 +1233,39 @@
       if (!item) return;
       closeOverlay();
       applyTemplate(item, target);
+    };
+
+    const render = () => {
+      const query = search.value.trim().toLowerCase();
+      shown = templates.filter((t) => !query ||
+        t.label.toLowerCase().includes(query) ||
+        t.text.toLowerCase().includes(query) ||
+        t.hotkey.toLowerCase().includes(query));
+      if (cursor >= shown.length) cursor = Math.max(0, shown.length - 1);
+      list.textContent = '';
+
+      if (!shown.length) {
+        const empty = h('li', 'empty', templates.length
+          ? 'Ничего не найдено'
+          : 'Автоответов пока нет — нажмите ⚙ и добавьте первый');
+        list.appendChild(empty);
+        return;
+      }
+
+      shown.forEach((item, index) => {
+        const li = h('li');
+        li.setAttribute('aria-selected', index === cursor ? 'true' : 'false');
+        const num = h('span', 'num', index < 9 ? String(index + 1) : '');
+        const text = h('span', 'text');
+        text.append(
+          h('div', 'label', item.label + (item.send ? ' ⏎' : '')),
+          h('div', 'preview', item.text.replace(/\s+/g, ' ').slice(0, 120))
+        );
+        li.append(num, text, h('kbd', null, item.hotkey));
+        li.addEventListener('mouseenter', () => { cursor = index; markSelection(); });
+        li.addEventListener('click', () => choose(index));
+        list.appendChild(li);
+      });
     };
 
     search.addEventListener('input', () => { cursor = 0; render(); });
@@ -983,6 +1294,7 @@
   // ========================== 11. СТАРТ ==========================
 
   reloadTemplates();
+  ensureFab();
 
   if (window.top === window.self && typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('Настроить автоответы', openSettings);
