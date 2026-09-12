@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      2.0.0
+// @version      2.1.0
 // @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам и помощник на модели.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -27,6 +27,7 @@
   const LOG_KEY = 'arh.log.v1';
   const NOTES_KEY = 'arh.notes.v1';
   const SEEN_KEY = 'arh.seen.v1';
+  const ARCHIVE_KEY = 'arh.archive.v1';
   const CURSOR = '{cursor}';           // маркер: куда поставить курсор после вставки
 
   // Автоответы «из коробки». Их можно полностью заменить в настройках
@@ -166,6 +167,28 @@
     notify: false
   };
 
+  // Архив, компенсации и правила «к закрытию»
+  const DEFAULT_ARCHIVE = { enabled: true, keepDays: 90 };
+
+  const DEFAULT_COUPON = {
+    sumField: 'Сумма заказа',
+    qtyField: 'Количество',
+    template: 'Компенсация по заказу: {amount} ₽ ({title} — {note}).'
+  };
+
+  const DEFAULT_RULES = [
+    '[Пора закрыть]',
+    'колонка: Статус',
+    'значение: Открыт',
+    'старше: 48',
+    'подсказка: висит больше двух суток — проверьте и закройте',
+    '',
+    '[Ждёт ответа покупателя]',
+    'колонка: Статус',
+    'значение: Ожидает',
+    'старше: 24'
+  ].join('\n');
+
   const DEFAULT_CONFIG = {
     text: DEFAULT_TEXT,
     pickerHotkey: 'Ctrl+Alt+Space',    // палитра со списком всех автоответов
@@ -176,7 +199,10 @@
     fabPos: null,                      // её положение, если пользователь перетащил
     panel: DEFAULT_PANEL,              // панель со сведениями о заказе
     ai: DEFAULT_AI,                    // помощник на базе модели
-    queue: DEFAULT_QUEUE               // очередь тикетов и статистика по курьерам
+    queue: DEFAULT_QUEUE,              // очередь тикетов и статистика по курьерам
+    archive: DEFAULT_ARCHIVE,          // накопленная история тикетов
+    coupon: DEFAULT_COUPON,            // калькулятор компенсации
+    rules: DEFAULT_RULES               // правила «что пора сделать»
   };
 
   // ========================== 2. ХРАНИЛИЩЕ ==========================
@@ -1206,6 +1232,9 @@
     const side = JSON.parse(JSON.stringify(Object.assign({}, DEFAULT_PANEL, config.panel || {})));
     const ai = Object.assign({}, DEFAULT_AI, config.ai || {});
     const queue = Object.assign({}, DEFAULT_QUEUE, config.queue || {});
+    const archive = Object.assign({}, DEFAULT_ARCHIVE, config.archive || {});
+    const coupon = Object.assign({}, DEFAULT_COUPON, config.coupon || {});
+    const misc = { rules: config.rules == null ? DEFAULT_RULES : config.rules };
     if (!Array.isArray(side.fields)) side.fields = [];
     const opts = {
       pickerHotkey: config.pickerHotkey,
@@ -1873,6 +1902,84 @@
       checkLine.append(check, result);
       body.appendChild(checkLine);
 
+      const rulesLabel = h('label', null, 'Правила «к закрытию»: что подсвечивать в очереди');
+      rulesLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:14px;';
+      const rulesArea = h('textarea', 'small');
+      rulesArea.spellcheck = false;
+      rulesArea.value = misc.rules;
+      rulesArea.style.marginTop = '4px';
+      const rulesCount = h('div', 'pval');
+      rulesCount.textContent = 'Правил: ' + parseRules(misc.rules).length;
+      rulesArea.addEventListener('input', () => {
+        misc.rules = rulesArea.value;
+        rulesCount.textContent = 'Правил: ' + parseRules(misc.rules).length;
+      });
+      rulesLabel.append(rulesArea, rulesCount);
+      body.appendChild(rulesLabel);
+
+      const archiveLabel = h('label', 'check');
+      const archiveBox = h('input');
+      archiveBox.type = 'checkbox';
+      archiveBox.checked = archive.enabled !== false;
+      archiveBox.addEventListener('change', () => { archive.enabled = archiveBox.checked; });
+      archiveLabel.append(archiveBox, document.createTextNode('Копить архив просмотренных тикетов'));
+      body.appendChild(archiveLabel);
+
+      const archiveLine = h('div', 'line');
+      const keepLabel = h('label', null, 'Хранить, дней');
+      keepLabel.style.cssText = 'font-size:12px;color:#5b6273;';
+      const keepInput = h('input', 'num');
+      keepInput.type = 'text';
+      keepInput.value = String(archive.keepDays == null ? '' : archive.keepDays);
+      keepInput.style.marginTop = '4px';
+      keepInput.addEventListener('input', () => { archive.keepDays = parseNumber(keepInput.value); });
+      keepLabel.appendChild(keepInput);
+      const archiveInfo = h('span', 'pval');
+      const refreshArchiveInfo = () => { archiveInfo.textContent = 'В архиве: ' + archiveRows().length + ' тикетов'; };
+      refreshArchiveInfo();
+      const clear = h('button', null, 'Очистить архив');
+      clear.addEventListener('click', () => {
+        if (!window.confirm('Удалить весь архив тикетов?')) return;
+        saveArchive({});
+        refreshArchiveInfo();
+        toast('Архив очищен');
+      });
+      archiveLine.append(keepLabel, clear, archiveInfo);
+      body.appendChild(archiveLine);
+
+      const couponHint = h('p', 'hint');
+      couponHint.style.margin = '16px 0 0';
+      couponHint.innerHTML = '<b>Компенсация.</b> Откуда брать числа (подписи строк панели) и каким текстом ' +
+        'подставлять результат: <code>{amount}</code>, <code>{title}</code>, <code>{note}</code>, <code>{sum}</code>.';
+      body.appendChild(couponHint);
+
+      const couponRow = h('div', 'row');
+      const couponField = (label, key, placeholder) => {
+        const wrap = h('label', null, label);
+        wrap.style.cssText = 'flex:1 1 160px;font-size:12px;color:#5b6273;';
+        const input = h('input');
+        input.type = 'text';
+        input.value = coupon[key] || '';
+        input.placeholder = placeholder;
+        input.style.marginTop = '4px';
+        input.addEventListener('input', () => { coupon[key] = input.value; });
+        wrap.appendChild(input);
+        couponRow.appendChild(wrap);
+      };
+      couponField('Строка с суммой', 'sumField', 'Сумма заказа');
+      couponField('Строка с количеством', 'qtyField', 'Количество');
+      body.appendChild(couponRow);
+
+      const templateLabel = h('label', null, 'Текст компенсации');
+      templateLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:10px;';
+      const templateInput = h('input');
+      templateInput.type = 'text';
+      templateInput.value = coupon.template || '';
+      templateInput.style.marginTop = '4px';
+      templateInput.addEventListener('input', () => { coupon.template = templateInput.value; });
+      templateLabel.appendChild(templateInput);
+      body.appendChild(templateLabel);
+
       const notes = loadNotes();
       count.textContent = 'Заметок сохранено: ' + Object.keys(notes).length;
     }
@@ -2136,7 +2243,10 @@
         fab: opts.fab,
         panel: side,
         ai: ai,
-        queue: queue
+        queue: queue,
+        archive: archive,
+        coupon: coupon,
+        rules: misc.rules
       });
       hotkeyCache.clear();
       reloadTemplates();
@@ -2749,16 +2859,19 @@ return {
 
     const head = h('div', 'side-head');
     const title = h('b', 'side-title', panel.title || 'Данные заказа');
-    const reload = h('button', 'icon', '⟳');
+    const reload = h('button', 'icon side-reload', '⟳');
     reload.title = 'Обновить';
     reload.addEventListener('click', fillSidePanel);
-    const gear = h('button', 'icon', '⚙');
+    const gear = h('button', 'icon side-gear', '⚙');
     gear.title = 'Настроить поля';
     gear.addEventListener('click', () => openSettings('panel'));
-    const queueButton = h('button', 'icon', '☰');
+    const coupon = h('button', 'icon side-coupon', '💰');
+    coupon.title = 'Посчитать компенсацию';
+    coupon.addEventListener('click', () => openCoupon());
+    const queueButton = h('button', 'icon side-queue', '☰');
     queueButton.title = 'Очередь тикетов (' + (config.queueHotkey || DEFAULT_CONFIG.queueHotkey) + ')';
     queueButton.addEventListener('click', () => openQueue());
-    const fold = h('button', 'icon', '–');
+    const fold = h('button', 'icon side-fold', '–');
     fold.title = 'Свернуть';
     fold.addEventListener('click', () => {
       config.panel = Object.assign({}, panelConfig(), { collapsed: !panelConfig().collapsed });
@@ -2766,7 +2879,7 @@ return {
       side.classList.toggle('folded', !!config.panel.collapsed);
       fold.textContent = config.panel.collapsed ? '+' : '–';
     });
-    head.append(title, h('span', 'spacer'), queueButton, reload, gear, fold);
+    head.append(title, h('span', 'spacer'), coupon, queueButton, reload, gear, fold);
 
     const body = h('div', 'side-body');
     side.append(head, body);
@@ -3898,6 +4011,7 @@ return {
     }
 
     queueCache = { ts: Date.now(), rows: rows, columns: columns, error: error };
+    mergeArchive(rows, columns);
     return queueCache;
   }
 
@@ -3931,6 +4045,170 @@ return {
       .sort((a, b) => (b.flagged - a.flagged) || (b.total - a.total));
   }
 
+  // ---------- Архив: копим то, что сайт со временем перестаёт показывать ----------
+
+  function archiveConfig() {
+    return Object.assign({}, DEFAULT_ARCHIVE, config.archive || {});
+  }
+
+  function loadArchive() {
+    try {
+      const raw = hasGM ? GM_getValue(ARCHIVE_KEY, null) : localStorage.getItem(ARCHIVE_KEY);
+      const parsed = typeof raw === 'string' && raw ? JSON.parse(raw) : raw;
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (e) { return {}; }
+  }
+
+  function saveArchive(archive) {
+    try {
+      const json = JSON.stringify(archive);
+      if (hasGM) GM_setValue(ARCHIVE_KEY, json); else localStorage.setItem(ARCHIVE_KEY, json);
+    } catch (e) { /* хранилище переполнено — архив не критичен */ }
+  }
+
+  /** Дописывает строки очереди в архив и подчищает старое. */
+  function mergeArchive(rows, columns) {
+    const conf = archiveConfig();
+    if (!conf.enabled || !rows.length) return;
+    const archive = loadArchive();
+    const now = Date.now();
+    rows.forEach((row) => {
+      const existing = archive[row.key];
+      archive[row.key] = {
+        values: row.values,
+        href: row.href,
+        columns: columns,
+        firstSeen: existing && existing.firstSeen ? existing.firstSeen : now,
+        lastSeen: now
+      };
+    });
+    const keepMs = Math.max(1, Number(conf.keepDays) || 90) * 86400000;
+    Object.keys(archive).forEach((key) => {
+      if (now - (archive[key].lastSeen || 0) > keepMs) delete archive[key];
+    });
+    saveArchive(archive);
+  }
+
+  function archiveRows() {
+    const archive = loadArchive();
+    return Object.keys(archive).map((key) => Object.assign({ key: key }, archive[key]))
+      .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+  }
+
+  function exportArchive(kind) {
+    const rows = archiveRows();
+    if (!rows.length) { toast('Архив пуст'); return; }
+    const columns = (rows[0].columns || []).slice();
+    let text = '';
+    let mime = 'application/json';
+    let name = 'tickets-archive.json';
+
+    if (kind === 'csv') {
+      const escape = (value) => '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"';
+      const header = columns.concat(['Впервые', 'Последний раз', 'Ссылка']);
+      const lines = [header.map(escape).join(';')];
+      rows.forEach((row) => {
+        const cells = columns.map((column) => escape(row.values[column] || ''));
+        cells.push(escape(new Date(row.firstSeen).toLocaleString()));
+        cells.push(escape(new Date(row.lastSeen).toLocaleString()));
+        cells.push(escape(row.href || ''));
+        lines.push(cells.join(';'));
+      });
+      text = '﻿' + lines.join('\n');                 // BOM — чтобы Excel не ломал кириллицу
+      mime = 'text/csv';
+      name = 'tickets-archive.csv';
+    } else {
+      text = JSON.stringify(rows, null, 2);
+    }
+
+    try {
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(new Blob([text], { type: mime }));
+      link.download = name;
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
+    } catch (e) { toast('Не удалось сохранить файл'); }
+  }
+
+  // ---------- Правила «к закрытию» ----------
+
+  /**
+   * Правила разбираются тем же блочным форматом:
+   *
+   *   [Пора закрыть]
+   *   колонка: Статус
+   *   значение: Открыт
+   *   старше: 48
+   */
+  function parseRules(text) {
+    const lines = String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n');
+    const rules = [];
+    let current = null;
+    lines.forEach((line) => {
+      const header = /^\s*\[([^\]]*)\]\s*$/.exec(line);
+      if (header) {
+        if (current && current.name) rules.push(current);
+        current = { name: header[1].trim(), column: '', value: '', hours: 0, note: '' };
+        return;
+      }
+      if (!current) return;
+      const field = /^\s*(колонка|значение|старше|подсказка)\s*:\s*(.*)$/i.exec(line);
+      if (!field) return;
+      const key = field[1].toLowerCase();
+      if (key === 'колонка') current.column = field[2].trim();
+      else if (key === 'значение') current.value = field[2].trim();
+      else if (key === 'старше') current.hours = parseNumber(field[2]);
+      else current.note = field[2].trim();
+    });
+    if (current && current.name) rules.push(current);
+    return rules;
+  }
+
+  /** Строки очереди, подпадающие под правило. */
+  function rowsByRule(rows, rule, dateColumn) {
+    const needle = normalizeText(rule.value);
+    const limitMs = Math.max(0, Number(rule.hours) || 0) * 3600000;
+    const now = Date.now();
+    return rows.filter((row) => {
+      if (rule.column && needle) {
+        if (normalizeText(row.values[rule.column] || '').indexOf(needle) === -1) return false;
+      }
+      if (!limitMs) return true;
+      const date = parseDate(row.values[dateColumn] || '');
+      if (!date) return false;                            // без даты возраст не проверить — не предлагаем
+      return now - date.getTime() >= limitMs;
+    });
+  }
+
+  // ---------- Калькулятор компенсации ----------
+
+  function couponConfig() {
+    return Object.assign({}, DEFAULT_COUPON, config.coupon || {});
+  }
+
+  /** Считает варианты компенсации. Вся арифметика здесь, модель к ней не допускается. */
+  function couponOptions(sum, qty, missing) {
+    const total = Math.max(0, parseNumber(sum));
+    const count = Math.max(0, parseNumber(qty));
+    const lost = Math.max(0, parseNumber(missing));
+    const round = (value) => Math.round(value * 100) / 100;
+    const options = [
+      { id: 'full', title: 'Полная', amount: round(total), note: 'вся сумма заказа' },
+      { id: 'half', title: 'Половина', amount: round(total / 2), note: '50% от суммы' }
+    ];
+    if (count > 0 && lost > 0) {
+      const perUnit = total / count;
+      options.push({
+        id: 'part',
+        title: 'Пропорционально',
+        amount: round(perUnit * Math.min(lost, count)),
+        note: lost + ' из ' + count + ' × ' + round(perUnit) + ' за штуку'
+      });
+    }
+    return options;
+  }
+
   // ---------- Окно очереди ----------
 
   let queueSort = { column: '', dir: 1 };
@@ -3946,7 +4224,9 @@ return {
     const tabs = h('div', 'tabs');
     const tabList = h('button', 'tab', 'Очередь');
     const tabCouriers = h('button', 'tab', 'Курьеры');
-    tabs.append(tabList, tabCouriers);
+    const tabRules = h('button', 'tab', 'К закрытию');
+    const tabArchive = h('button', 'tab', 'Архив');
+    tabs.append(tabList, tabCouriers, tabRules, tabArchive);
     const refresh = h('button', 'icon', '⟳');
     refresh.title = 'Перечитать список';
     head.append(tabs, refresh);
@@ -3962,7 +4242,7 @@ return {
     foot.append(count, h('span', 'spacer'), close);
     panel.appendChild(foot);
 
-    let active = initialTab === 'couriers' ? 'couriers' : 'list';
+    let active = ['couriers', 'rules', 'archive'].indexOf(initialTab) !== -1 ? initialTab : 'list';
     let data = { rows: [], columns: [], error: '' };
     const filters = { text: '', type: '', status: '', courier: '', onlyNotes: false };
 
@@ -4133,18 +4413,228 @@ return {
       body.appendChild(holder);
     }
 
+    function renderRules() {
+      const rules = parseRules(config.rules == null ? DEFAULT_RULES : config.rules);
+      count.textContent = 'Правил: ' + rules.length + ' · строк в списке: ' + data.rows.length;
+      if (!rules.length) {
+        body.appendChild(h('div', 'side-empty', 'Правила не заданы — вкладка «Очередь» в настройках'));
+        return;
+      }
+      const hint = h('p', 'hint');
+      hint.textContent = 'Скрипт только показывает, что подпадает под правило. Ничего не закрывает и не отправляет — ' +
+        'открывайте и решайте сами.';
+      body.appendChild(hint);
+
+      rules.forEach((rule) => {
+        const matched = rowsByRule(data.rows, rule, conf.dateColumn);
+        const title = h('p', 'hint');
+        title.style.margin = '14px 0 6px';
+        title.innerHTML = '<b>' + rule.name + '</b> — ' + (rule.column ? rule.column + ' = «' + rule.value + '»' : 'без условия') +
+          (rule.hours ? ', старше ' + rule.hours + ' ч' : '') + ' · найдено: ' + matched.length +
+          (rule.note ? '<br>' + rule.note : '');
+        body.appendChild(title);
+        if (!matched.length) {
+          body.appendChild(h('div', 'pval', 'Ничего не подпадает'));
+          return;
+        }
+        const holder = h('div', 'table-holder');
+        holder.style.maxHeight = '26vh';
+        const table = h('table', 'grid');
+        const header = h('tr');
+        [data.columns[0] || 'Номер', conf.dateColumn, conf.statusColumn, ''].forEach((column) => {
+          header.appendChild(h('th', null, column));
+        });
+        table.appendChild(header);
+        matched.forEach((row) => {
+          const tr = h('tr');
+          tr.appendChild(h('td', null, row.values[data.columns[0]] || ''));
+          tr.appendChild(h('td', null, row.values[conf.dateColumn] || ''));
+          tr.appendChild(h('td', null, row.values[conf.statusColumn] || ''));
+          const cell = h('td');
+          if (row.href) {
+            const open = h('button', 'icon', 'Открыть');
+            open.addEventListener('click', () => window.open(row.href, '_blank'));
+            cell.appendChild(open);
+          }
+          tr.appendChild(cell);
+          table.appendChild(tr);
+        });
+        holder.appendChild(table);
+        body.appendChild(holder);
+      });
+    }
+
+    function renderArchive() {
+      const rows = archiveRows();
+      count.textContent = 'В архиве: ' + rows.length + ' тикетов';
+      const hint = h('p', 'hint');
+      hint.textContent = 'Сюда складывается всё, что скрипт видел в списке, — даже если сайт это уже не показывает.';
+      body.appendChild(hint);
+
+      const line = h('div', 'line');
+      const search = h('input');
+      search.type = 'text';
+      search.placeholder = 'Поиск по архиву…';
+      const csv = h('button', null, 'Скачать CSV');
+      csv.addEventListener('click', () => exportArchive('csv'));
+      const json = h('button', null, 'Скачать JSON');
+      json.addEventListener('click', () => exportArchive('json'));
+      line.append(search, csv, json);
+      body.appendChild(line);
+
+      const holder = h('div', 'table-holder');
+      body.appendChild(holder);
+
+      const draw = () => {
+        holder.textContent = '';
+        const needle = normalizeText(search.value);
+        const shown = rows.filter((row) => !needle ||
+          normalizeText(Object.keys(row.values).map((key) => row.values[key]).join(' ')).indexOf(needle) !== -1);
+        count.textContent = 'В архиве: ' + rows.length + ' · показано: ' + shown.length;
+        if (!shown.length) {
+          holder.appendChild(h('div', 'side-empty', rows.length ? 'Ничего не найдено' : 'Архив пока пуст'));
+          return;
+        }
+        const columns = shown[0].columns || data.columns;
+        const table = h('table', 'grid');
+        const header = h('tr');
+        columns.concat(['Впервые', 'Последний раз']).forEach((column) => header.appendChild(h('th', null, column)));
+        table.appendChild(header);
+        shown.slice(0, 300).forEach((row) => {
+          const tr = h('tr');
+          columns.forEach((column) => tr.appendChild(h('td', null, row.values[column] || '')));
+          tr.appendChild(h('td', null, new Date(row.firstSeen).toLocaleDateString()));
+          tr.appendChild(h('td', null, new Date(row.lastSeen).toLocaleDateString()));
+          if (row.href) {
+            tr.style.cursor = 'pointer';
+            tr.addEventListener('click', () => window.open(row.href, '_blank'));
+          }
+          table.appendChild(tr);
+        });
+        holder.appendChild(table);
+      };
+      search.addEventListener('input', draw);
+      draw();
+    }
+
     function render() {
       body.textContent = '';
       tabList.setAttribute('aria-selected', String(active === 'list'));
       tabCouriers.setAttribute('aria-selected', String(active === 'couriers'));
-      if (active === 'list') renderList(); else renderCouriers();
+      tabRules.setAttribute('aria-selected', String(active === 'rules'));
+      tabArchive.setAttribute('aria-selected', String(active === 'archive'));
+      if (active === 'list') renderList();
+      else if (active === 'couriers') renderCouriers();
+      else if (active === 'rules') renderRules();
+      else renderArchive();
     }
 
     tabList.addEventListener('click', () => { active = 'list'; render(); });
     tabCouriers.addEventListener('click', () => { active = 'couriers'; render(); });
+    tabRules.addEventListener('click', () => { active = 'rules'; render(); });
+    tabArchive.addEventListener('click', () => { active = 'archive'; render(); });
     refresh.addEventListener('click', () => load(true));
 
     await load(false);
+  }
+
+  // ---------- Калькулятор компенсации ----------
+
+  function openCoupon() {
+    const conf = couponConfig();
+    const facts = aiFacts();
+    const factValue = (label) => {
+      const found = facts.filter((fact) => normalizeText(fact.label) === normalizeText(label))[0];
+      return found ? found.value : '';
+    };
+
+    const overlay = createOverlay();
+    const panel = h('div', 'panel');
+    overlay.appendChild(panel);
+
+    const head = h('div', 'head');
+    head.append(h('h2', null, '💰 Компенсация'), h('span', 'spacer'));
+    panel.appendChild(head);
+
+    const body = h('div', 'body');
+    panel.appendChild(body);
+    const foot = h('div', 'foot');
+    panel.appendChild(foot);
+
+    const hint = h('p', 'hint');
+    hint.textContent = 'Суммы считает скрипт, не модель. Значения подставлены из панели — поправьте, если нужно.';
+    body.appendChild(hint);
+
+    const row = h('div', 'row');
+    const input = (label, value, placeholder) => {
+      const wrap = h('label', null, label);
+      wrap.style.cssText = 'flex:1 1 150px;font-size:12px;color:#5b6273;';
+      const node = h('input');
+      node.type = 'text';
+      node.value = value || '';
+      node.placeholder = placeholder || '';
+      node.style.marginTop = '4px';
+      wrap.appendChild(node);
+      row.appendChild(wrap);
+      return node;
+    };
+    const sumInput = input('Сумма заказа', factValue(conf.sumField), '5985');
+    const qtyInput = input('Количество', factValue(conf.qtyField), '15');
+    const missInput = input('Не найдено, шт', '', '3');
+    body.appendChild(row);
+
+    const list = h('div');
+    list.style.marginTop = '12px';
+    body.appendChild(list);
+
+    const area = h('textarea');
+    area.style.minHeight = '14vh';
+    area.style.marginTop = '10px';
+    body.appendChild(area);
+
+    const renderOptions = () => {
+      list.textContent = '';
+      const options = couponOptions(sumInput.value, qtyInput.value, missInput.value);
+      options.forEach((option) => {
+        const line = h('div', 'side-row');
+        line.style.cursor = 'pointer';
+        line.append(
+          h('span', 'side-label', option.title),
+          h('span', 'side-value', option.amount + ' ₽ · ' + option.note)
+        );
+        line.addEventListener('click', () => {
+          area.value = String(conf.template || DEFAULT_COUPON.template)
+            .replace(/\{amount\}/g, option.amount)
+            .replace(/\{title\}/g, option.title.toLowerCase())
+            .replace(/\{note\}/g, option.note)
+            .replace(/\{sum\}/g, parseNumber(sumInput.value));
+        });
+        list.appendChild(line);
+      });
+    };
+    [sumInput, qtyInput, missInput].forEach((node) => node.addEventListener('input', renderOptions));
+    renderOptions();
+
+    const target = resolveTarget();
+    const copy = h('button', null, 'Скопировать');
+    copy.addEventListener('click', () => {
+      try { navigator.clipboard.writeText(area.value); toast('Скопировано'); } catch (e) {}
+    });
+    foot.appendChild(copy);
+    if (target) {
+      const paste = h('button', 'primary', 'Вставить в поле');
+      paste.addEventListener('click', () => {
+        if (!area.value.trim()) { toast('Сначала выберите вариант'); return; }
+        const text = area.value;
+        closeOverlay();
+        insertTemplateText(target, text);
+        toast('Вставлено — проверьте и отправьте сами');
+      });
+      foot.appendChild(paste);
+    }
+    const close = h('button', null, 'Закрыть');
+    close.addEventListener('click', closeOverlay);
+    foot.append(h('span', 'spacer'), close);
   }
 
   // ---------- Заметка по текущему тикету ----------
