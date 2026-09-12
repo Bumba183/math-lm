@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      1.8.0
+// @version      1.9.0
 // @description  Автоответы по триггеру или горячим клавишам, боковая панель со сведениями о заказе и статистикой покупателя, плюс помощник на модели: черновик ответа, вердикт по сроку, риск покупателя, разбор данных, резюме и вычитка.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -24,6 +24,7 @@
   // ========================== 1. КОНФИГУРАЦИЯ ==========================
 
   const STORE_KEY = 'arh.config.v1';
+  const LOG_KEY = 'arh.log.v1';
   const CURSOR = '{cursor}';           // маркер: куда поставить курсор после вставки
 
   // Автоответы «из коробки». Их можно полностью заменить в настройках
@@ -101,7 +102,51 @@
     maxTokens: 900,
     contextLimit: 6000,
     chatSelector: '',
-    tone: 'Вежливо, по-деловому, на «вы», без канцелярита и лишних извинений.'
+    tone: 'Вежливо, по-деловому, на «вы», без канцелярита и лишних извинений.',
+    playbook: [
+      '# Шаги разбирательства. «если» — слова-правило (сработает без модели),',
+      '# «когда» — описание для модели, «ждём» — что ждём от покупателя дальше.',
+      '',
+      '[first_reply | Первичный ответ]',
+      'когда: покупатель только что открыл тикет, подробностей ещё нет',
+      'ждём: описание проблемы и фото',
+      'Здравствуйте! Разбираемся с вашим обращением. Опишите, пожалуйста, что именно пошло не так, и приложите фото места.',
+      '',
+      '[repeat_search | Повторный поиск днём]',
+      'если: не наш, ноч',
+      'когда: искал ночью или в темноте и не нашёл',
+      'ждём: результат дневного поиска и фото места',
+      'Здравствуйте! Ночью найти закладку почти невозможно — фонарь сильно искажает ориентиры.',
+      'Проведите, пожалуйста, повторный поиск при дневном свете и пришлите фото места поиска.',
+      '',
+      '[repeat_done | Повторный поиск не помог]',
+      'если: повторно, не наш',
+      'когда: покупатель уже искал повторно днём и снова не нашёл',
+      'ждём: ничего, решение за нами',
+      'Спасибо, что проверили ещё раз. Передаю обращение на решение — вернусь с ответом в ближайшее время.',
+      '',
+      '[need_photo | Ждём фото]',
+      'если: фото, не приш',
+      'когда: без фото решение принять нельзя',
+      'ждём: фото места и упаковки',
+      'Пришлите, пожалуйста, фото места поиска и упаковки — без них не смогу разобраться.',
+      '',
+      '[quality | Проблема с качеством]',
+      'когда: покупатель жалуется на качество товара',
+      'ждём: фото товара крупным планом',
+      'Здравствуйте! Сожалею, что так вышло. Пришлите фото товара крупным планом — передам на проверку и вернусь с решением.',
+      '',
+      '[track | Трек-номер]',
+      'если: трек',
+      'когда: спрашивает трек-номер почтового отправления',
+      'ждём: ничего, выдаём трек',
+      'Здравствуйте! Трек-номер: {ask:Введите трек}. Отслеживание обновляется в течение суток.',
+      '',
+      '[close | Закрытие]',
+      'когда: вопрос решён, покупатель подтвердил',
+      'ждём: ничего',
+      'Рад, что всё решилось. Если появятся вопросы — пишите, мы на связи.'
+    ].join('\n')
   };
 
   const DEFAULT_CONFIG = {
@@ -1765,6 +1810,21 @@
       toneLabel.appendChild(toneArea);
       body.appendChild(toneLabel);
 
+      const bookLabel = h('label', null, 'Сценарий разбирательства: шаги, которыми ведём тикет');
+      bookLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:12px;';
+      const bookArea = h('textarea');
+      bookArea.spellcheck = false;
+      bookArea.value = ai.playbook || '';
+      bookArea.style.marginTop = '4px';
+      bookArea.addEventListener('input', () => {
+        ai.playbook = bookArea.value;
+        bookCount.textContent = 'Шагов в сценарии: ' + parsePlaybook(bookArea.value).length;
+      });
+      const bookCount = h('div', 'pval');
+      bookCount.textContent = 'Шагов в сценарии: ' + parsePlaybook(ai.playbook).length;
+      bookLabel.append(bookArea, bookCount);
+      body.appendChild(bookLabel);
+
       const chatLabel = h('label', null, 'Где переписка (пусто — берём текст страницы)');
       chatLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:12px;';
       const chatLine = h('div', 'line');
@@ -1801,6 +1861,28 @@
       limits.append(ctxLabel, tempLabel);
       body.appendChild(limits);
 
+      const logLine = h('div', 'line');
+      logLine.style.marginTop = '14px';
+      const log = loadLog();
+      const accepted = log.filter((entry) => entry.source === 'accepted').length;
+      const logInfo = h('span', 'pval');
+      logInfo.textContent = 'В журнале решений: ' + log.length + ' (вставлено оператором: ' + accepted + ')';
+      const save = h('button', null, 'Скачать журнал');
+      save.title = 'JSON с предложенными шагами — пригодится, чтобы обучать подсказки на своих случаях';
+      save.addEventListener('click', () => {
+        try {
+          const blob = new Blob([JSON.stringify(loadLog(), null, 2)], { type: 'application/json' });
+          const link = document.createElement('a');
+          link.href = URL.createObjectURL(blob);
+          link.download = 'autoreply-log.json';
+          document.body.appendChild(link);
+          link.click();
+          setTimeout(() => { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
+        } catch (e) { toast('Не удалось сохранить журнал'); }
+      });
+      logLine.append(logInfo, save);
+      body.appendChild(logLine);
+
       const checkLine = h('div', 'line');
       checkLine.style.marginTop = '14px';
       const check = h('button', null, 'Проверить связь');
@@ -1821,7 +1903,7 @@
       checkLine.append(check, checkResult);
       body.appendChild(checkLine);
 
-      count.textContent = 'Задач ИИ: ' + Object.keys(AI_TASKS).length;
+      count.textContent = 'Задач ИИ: ' + (Object.keys(AI_TASKS).length + 1);
     }
 
     function renderOpts() {
@@ -2980,6 +3062,90 @@ return {
       .join('\n');
   }
 
+  // ---------- Сценарий разбирательства ----------
+
+  /**
+   * Плейбук — список шагов, которыми идёт разбор тикета. Формат блока:
+   *
+   *   [repeat_search | Повторный поиск]
+   *   если: не нашёл, ночью
+   *   когда: покупатель искал в темноте и ничего не нашёл
+   *   ждём: фото места и время дневного поиска
+   *   Здравствуйте! Давайте повторим поиск при дневном свете…
+   *
+   * «если» — слова для правила: если все встречаются в переписке, шаг предлагается
+   * без обращения к модели. «когда» и «ждём» уходят модели как описание шага.
+   */
+  function parsePlaybook(text) {
+    const lines = String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n');
+    const steps = [];
+    let current = null;
+
+    const flush = () => {
+      if (!current) return;
+      current.text = trimBlankEdges(current.lines).join('\n');
+      if (current.id && current.text) steps.push(current);
+      current = null;
+    };
+
+    lines.forEach((line) => {
+      const header = /^\s*\[([^\]]*)\]\s*$/.exec(line);
+      if (header) {
+        flush();
+        const parts = header[1].split('|').map((part) => part.trim());
+        current = {
+          id: (parts[0] || '').replace(/\s+/g, '_'),
+          title: parts[1] || parts[0] || '',
+          rule: '', when: '', wait: '', lines: []
+        };
+        return;
+      }
+      if (!current) return;
+      const field = /^\s*(если|когда|ждём|ждем)\s*:\s*(.*)$/i.exec(line);
+      if (field && !current.lines.length) {
+        const key = field[1].toLowerCase();
+        if (key === 'если') current.rule = field[2].trim();
+        else if (key === 'когда') current.when = field[2].trim();
+        else current.wait = field[2].trim();
+        return;
+      }
+      current.lines.push(line);
+    });
+    flush();
+    return steps;
+  }
+
+  /** Шаг, который подходит по правилу «если» — без обращения к модели. */
+  function matchPlaybookRule(steps, haystack) {
+    const text = normalizeText(haystack);
+    if (!text) return null;
+    for (let i = 0; i < steps.length; i++) {
+      const words = String(steps[i].rule || '').split(',').map(normalizeText).filter(Boolean);
+      if (!words.length) continue;
+      if (words.every((word) => text.indexOf(word) !== -1)) return steps[i];
+    }
+    return null;
+  }
+
+  /** Журнал предложенных решений — основа для будущей метрики точности и примеров. */
+  function loadLog() {
+    try {
+      const raw = hasGM ? GM_getValue(LOG_KEY, null) : localStorage.getItem(LOG_KEY);
+      const parsed = typeof raw === 'string' && raw ? JSON.parse(raw) : raw;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) { return []; }
+  }
+
+  function logDecision(entry) {
+    try {
+      const log = loadLog();
+      log.push(Object.assign({ ts: Date.now(), url: location.href }, entry));
+      const trimmed = log.slice(-300);
+      const json = JSON.stringify(trimmed);
+      if (hasGM) GM_setValue(LOG_KEY, json); else localStorage.setItem(LOG_KEY, json);
+    } catch (e) { /* журнал не критичен */ }
+  }
+
   const AI_RULES = [
     'Ты помощник оператора поддержки. Отвечай по-русски.',
     'Все числа и даты уже посчитаны и приведены в блоке ДАННЫЕ. Не пересчитывай их и не придумывай новых.',
@@ -3106,6 +3272,164 @@ return {
     } finally {
       aiBusy = false;
     }
+  }
+
+  /** Ведёт разбирательство дальше: выбирает следующий шаг сценария. */
+  async function runNextStep() {
+    if (aiBusy) return;
+    const conf = aiConfig();
+    const steps = parsePlaybook(conf.playbook);
+    if (!steps.length) {
+      toast('Сценарий пуст — заполните его в настройках, вкладка «ИИ»');
+      return;
+    }
+    const context = aiContext();
+
+    // Типовые случаи закрываются правилом — без запроса к модели
+    const byRule = matchPlaybookRule(steps, context.chat);
+    if (byRule) {
+      logDecision({ step: byRule.id, source: 'rule' });
+      showStepWindow(byRule, {
+        source: 'по правилу «' + byRule.rule + '» — модель не спрашивали',
+        why: byRule.when || '',
+        wait: byRule.wait || '',
+        text: byRule.text
+      });
+      return;
+    }
+
+    const list = steps.map((step) => '- ' + step.id + ' (' + step.title + ')' +
+      (step.when ? ': ' + step.when : '')).join('\n');
+    const prompt = [
+      'ЗАДАЧА: выбери следующий шаг разбирательства и напиши текст сообщения покупателю.',
+      'Выбирать можно ТОЛЬКО из списка шагов ниже, поле step — это id из списка.',
+      'Формат ответа: {"step":"id","why":"почему именно этот шаг","reply":"текст покупателю","wait":"чего ждём дальше"}',
+      '',
+      'ШАГИ:', list,
+      '',
+      'ДАННЫЕ:', factsBlock(context),
+      '',
+      'ПЕРЕПИСКА:', context.chat
+    ].join('\n');
+    const system = AI_RULES + ' Верни только JSON с полями step, why, reply, wait.';
+
+    aiBusy = true;
+    showStepWindow(null, { state: 'loading', prompt: prompt });
+    try {
+      const answer = await aiAsk(system, prompt, { temperature: 0.2 });
+      const data = parseJsonLoose(answer);
+      const step = data && steps.filter((item) => item.id === String(data.step))[0];
+      if (!step) {
+        // модель ушла в сторону — показываем как есть, но решением это не считаем
+        showStepWindow(null, {
+          state: 'error',
+          prompt: prompt,
+          text: 'Модель предложила шаг вне сценария. Ответ целиком:\n\n' + answer
+        });
+        logDecision({ step: data && data.step || '?', source: 'model', invalid: true });
+        return;
+      }
+      logDecision({ step: step.id, source: 'model' });
+      showStepWindow(step, {
+        source: 'выбрала модель',
+        why: String(data.why || step.when || ''),
+        wait: String(data.wait || step.wait || ''),
+        text: String(data.reply || step.text),
+        prompt: prompt
+      });
+    } catch (error) {
+      showStepWindow(null, { state: 'error', prompt: prompt, text: String(error && error.message || error) });
+    } finally {
+      aiBusy = false;
+    }
+  }
+
+  function showStepWindow(step, info) {
+    const overlay = createOverlay();
+    const panel = h('div', 'panel');
+    overlay.appendChild(panel);
+
+    const head = h('div', 'head');
+    head.append(h('h2', null, '▶ ' + (step ? 'Следующий шаг: ' + step.title : 'Следующий шаг')), h('span', 'spacer'));
+    panel.appendChild(head);
+
+    const body = h('div', 'body');
+    panel.appendChild(body);
+    const foot = h('div', 'foot');
+    panel.appendChild(foot);
+
+    if (info.state === 'loading') {
+      body.appendChild(h('div', 'side-empty', 'Подбираю шаг…'));
+      const wait = h('button', null, 'Закрыть');
+      wait.addEventListener('click', closeOverlay);
+      foot.append(h('span', 'spacer'), wait);
+      return;
+    }
+
+    if (info.state === 'error') {
+      const box = h('div', 'notes');
+      box.textContent = info.text;
+      body.appendChild(box);
+    } else {
+      const meta = h('div');
+      meta.style.marginBottom = '10px';
+      const row = (label, value) => {
+        if (!value) return;
+        const line = h('div', 'side-row');
+        line.append(h('span', 'side-label', label), h('span', 'side-value', value));
+        meta.appendChild(line);
+      };
+      row('Источник', info.source || '');
+      row('Почему', info.why || '');
+      row('Ждём дальше', info.wait || '');
+      body.appendChild(meta);
+
+      const area = h('textarea');
+      area.value = String(info.text || '');
+      area.spellcheck = false;
+      area.style.minHeight = '22vh';
+      body.appendChild(area);
+      info.area = area;
+    }
+
+    if (info.prompt) {
+      const details = document.createElement('details');
+      details.style.marginTop = '10px';
+      const summary = document.createElement('summary');
+      summary.textContent = 'Что отправлено модели';
+      summary.style.cssText = 'cursor:pointer;font-size:12px;color:#5b6273';
+      const pre = h('div', 'pval');
+      pre.style.cssText = 'white-space:pre-wrap;margin-top:6px;max-height:24vh;overflow:auto';
+      pre.textContent = info.prompt;
+      details.append(summary, pre);
+      body.appendChild(details);
+    }
+
+    if (info.area) {
+      const target = resolveTarget();
+      const copy = h('button', null, 'Скопировать');
+      copy.addEventListener('click', () => {
+        try { navigator.clipboard.writeText(info.area.value); toast('Скопировано'); } catch (e) {}
+      });
+      foot.appendChild(copy);
+
+      if (target) {
+        const paste = h('button', 'primary', 'Вставить в поле');
+        paste.addEventListener('click', async () => {
+          const text = await expandPlaceholders(info.area.value, target, '');   // {ask:…} спросит здесь
+          if (text === null) return;
+          closeOverlay();
+          insertTemplateText(target, text);
+          logDecision({ step: step ? step.id : '?', source: 'accepted' });
+          toast('Вставлено — проверьте и отправьте сами');
+        });
+        foot.appendChild(paste);
+      }
+    }
+
+    const close = h('button', null, 'Закрыть');
+    close.addEventListener('click', closeOverlay);
+    foot.append(h('span', 'spacer'), close);
   }
 
   function showAiWindow(task, result) {
@@ -3286,6 +3610,10 @@ return {
   /** Ряд кнопок ИИ в шапке боковой панели. */
   function aiButtons() {
     const row = h('div', 'ai-row');
+    const next = h('button', 'icon', '▶');
+    next.title = 'Следующий шаг разбирательства';
+    next.addEventListener('click', () => runNextStep());
+    row.appendChild(next);
     Object.keys(AI_TASKS).forEach((taskId) => {
       const task = AI_TASKS[taskId];
       const button = h('button', 'icon', task.icon);
