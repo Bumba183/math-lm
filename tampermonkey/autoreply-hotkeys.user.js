@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      2.9.0
+// @version      2.10.0
 // @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам, оценка риска по формуле, разбор фото клада и помощник на модели.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -68,6 +68,8 @@
     hideEmpty: true,                   // не показывать строки, для которых на странице нет данных
     compact: true,                     // не повторять числа, которые уже видны в строке с долей
     packs: { url: '~/product-packing/list/', column: 'Товар', selector: '', values: [], counted: [] },
+    // приоритет безопасности по типу позиции: 1 — самый ненадёжный, 5 — самый безопасный
+    stash: { url: '', column: 'Тип', selector: '', values: [], ranks: {} },
     fields: [
       // Блок «О покупателе» на странице тикета — читается по подписям
       { label: 'Покупатель', source: 'label', query: 'Покупатель', selector: '', attr: '', regex: '', mode: 'text' },
@@ -1772,6 +1774,97 @@
       }
       renderPacks();
       body.appendChild(packsBox);
+
+      // ---- Приоритет безопасности по типу позиции ----
+      if (!side.stash) side.stash = { url: '', column: 'Тип', selector: '', values: [], ranks: {} };
+      const stash = side.stash;
+      if (!stash.ranks) stash.ranks = {};
+
+      const stashBox = h('div', 'note-box');
+      stashBox.style.marginTop = '16px';
+      const stashHint = h('p', 'hint');
+      stashHint.style.marginTop = '0';
+      stashHint.innerHTML = '<b>Тип позиции.</b> Соберите список типов со страницы, где они перечислены ' +
+        '(подойдёт и карточка клада — варианты берутся прямо из выпадающего списка «Тип»), и поставьте ' +
+        'каждому приоритет безопасности от 1 до 5. <b>5</b> — такой тип находят почти всегда, ' +
+        '<b>1</b> — теряется сам. Оценка риска берёт это в расчёт: ±5 баллов за шаг от середины.';
+      stashBox.appendChild(stashHint);
+
+      const stashLine = h('div', 'line');
+      const stashUrl = h('input');
+      stashUrl.type = 'text';
+      stashUrl.value = stash.url || '';
+      stashUrl.placeholder = '~/product-packing-item/110209/update/ (пусто — текущая страница)';
+      stashUrl.addEventListener('input', () => { stash.url = stashUrl.value.trim(); });
+      const stashColumn = h('input');
+      stashColumn.type = 'text';
+      stashColumn.value = stash.column || '';
+      stashColumn.placeholder = 'подпись: Тип';
+      stashColumn.style.flex = '0 1 130px';
+      stashColumn.addEventListener('input', () => { stash.column = stashColumn.value.trim(); });
+      stashLine.append(h('span', 'pval', 'где типы'), stashUrl, stashColumn);
+      stashBox.appendChild(stashLine);
+
+      const stashTools = h('div', 'line');
+      const stashPick = h('button', null, 'Указать список');
+      stashPick.title = 'Кликните выпадающий список «Тип» на странице';
+      stashPick.addEventListener('click', () => pickElement((path, el) => {
+        if (!el) return;
+        stash.selector = shortSelector(el);
+        toast('Запомнил: ' + stash.selector);
+      }));
+      const stashScan = h('button', null, 'Собрать типы');
+      stashScan.addEventListener('click', () => {
+        const run = (second) => {
+          const found = collectTypes(stash);
+          if (found.length) {
+            stash.values = found;
+            renderStash();
+            toast('Найдено типов: ' + found.length);
+            return;
+          }
+          if (stash.url && !second) {
+            toast('Загружаю страницу…');
+            setTimeout(() => run(true), 1500);
+            return;
+          }
+          toast('Не нашлось — проверьте адрес и подпись списка');
+        };
+        run(false);
+      });
+      stashTools.append(stashPick, stashScan);
+      stashBox.appendChild(stashTools);
+
+      const stashList = h('div', 'line');
+      stashList.style.cssText = 'flex-direction: column; align-items: stretch; gap: 2px;';
+      stashBox.appendChild(stashList);
+
+      function renderStash() {
+        stashList.textContent = '';
+        if (!stash.values || !stash.values.length) {
+          stashList.appendChild(h('span', 'pval', 'Типы не собраны — нажмите «Собрать типы».'));
+          return;
+        }
+        stash.values.forEach((value) => {
+          const row = h('div', 'side-row');
+          const select = h('select');
+          [['', 'не задан'], ['1', '1 — теряется сам'], ['2', '2'], ['3', '3 — как обычно'], ['4', '4'],
+           ['5', '5 — находят всегда']].forEach((pair) => {
+            const option = h('option', null, pair[1]);
+            option.value = pair[0];
+            select.appendChild(option);
+          });
+          select.value = stash.ranks[value] ? String(stash.ranks[value]) : '';
+          select.addEventListener('change', () => {
+            if (select.value) stash.ranks[value] = Number(select.value);
+            else delete stash.ranks[value];
+          });
+          row.append(h('span', 'side-label', value), select);
+          stashList.appendChild(row);
+        });
+      }
+      renderStash();
+      body.appendChild(stashBox);
 
       const list = h('div');
       list.style.marginTop = '16px';
@@ -3822,6 +3915,78 @@
     });
   }
 
+  const EMPTY_OPTIONS = ['', '---------', '--------', '—', '-', 'выберите', 'не выбрано', 'нет'];
+
+  /** Пункты выпадающего списка рядом с подписью: «Тип» → камень, магнит, прикоп. */
+  function collectOptions(doc, label, selector) {
+    const take = (select) => Array.prototype.slice.call(select.options || [])
+      .map((option) => String(option.textContent || '').replace(/\s+/g, ' ').trim());
+
+    if (selector) {
+      try {
+        const picked = doc.querySelector(selector);
+        if (picked) return picked.tagName === 'SELECT' ? take(picked) : [];
+      } catch (e) { return []; }
+    }
+
+    const needle = normalizeText(label).replace(/[:：*]$/, '');
+    const selects = Array.prototype.slice.call(doc.querySelectorAll('select'));
+    if (!selects.length) return [];
+    if (!needle) return take(selects[0]);
+
+    for (let i = 0; i < selects.length; i++) {
+      const select = selects[i];
+      const near = [
+        select.getAttribute('name'), select.getAttribute('id'),
+        select.previousElementSibling && select.previousElementSibling.textContent,
+        select.parentElement && select.parentElement.previousElementSibling &&
+          select.parentElement.previousElementSibling.textContent,
+        select.closest && select.closest('label') && select.closest('label').textContent,
+        select.parentElement && select.parentElement.textContent
+      ];
+      const hit = near.some((value) => normalizeText(value).replace(/[:：*]/g, '').indexOf(needle) !== -1);
+      if (hit) return take(select);
+    }
+    return [];
+  }
+
+  /** Варианты типа позиции: сначала выпадающий список, иначе колонка таблицы. */
+  function collectTypes(stash) {
+    if (!stash) return [];
+    let doc = document;
+    if (stash.url) {
+      const expanded = expandUrl(stash.url, location.href);
+      if (!expanded) return [];
+      let url = null;
+      try { url = new URL(expanded); } catch (e) { return []; }
+      if (url.origin !== location.origin) return [];
+      const remote = getRemoteDoc(url.href);
+      if (!remote) return [];
+      doc = remote;
+    }
+
+    const found = collectOptions(doc, stash.column, stash.selector).concat(collectColumn(doc, stash.column));
+    const seen = new Map();
+    found.forEach((value) => {
+      const clean = String(value || '').replace(/\s+/g, ' ').trim();
+      const key = normalizeText(clean);
+      if (!clean || clean.length > 60 || EMPTY_OPTIONS.indexOf(key) !== -1) return;
+      if (!seen.has(key)) seen.set(key, clean);
+    });
+    return Array.from(seen.values());
+  }
+
+  /** Приоритет безопасности выбранного типа: 1…5, по умолчанию 3 — «как обычно». */
+  function stashRank(type) {
+    const stash = panelConfig().stash || {};
+    const ranks = stash.ranks || {};
+    const key = normalizeText(type);
+    if (!key) return null;
+    const found = Object.keys(ranks).filter((name) => normalizeText(name) === key)[0];
+    const rank = found ? Number(ranks[found]) : NaN;
+    return isFinite(rank) && rank >= 1 && rank <= 5 ? rank : null;
+  }
+
   /** Значения колонки таблицы по заголовку — например колонки «Товар». */
   function collectColumn(doc, name) {
     const needle = normalizeText(name).replace(/[:：]$/, '');
@@ -4965,6 +5130,18 @@
       if (days > limit) {
         out.push({ key: 'Долго лежал до покупки', group: 'around', points: -10,
                    note: Math.round(days) + ' дн. при пороге ' + limit + ' — клад мог не дожить до покупателя' });
+      }
+    }
+
+    const type = value('Тип клада');
+    const rank = stashRank(type);
+    if (rank) {
+      const points = (rank - 3) * 5;                       // 5 — безопасный тип, 1 — ненадёжный
+      if (points) {
+        out.push({ key: 'Тип клада: ' + type, group: 'around', points: points,
+                   note: 'приоритет безопасности ' + rank + ' из 5 — ' +
+                     (points > 0 ? 'такой тип обычно находят, довод против покупателя'
+                                 : 'такой тип теряется и сам, довод в пользу покупателя') });
       }
     }
 
