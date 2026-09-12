@@ -2,8 +2,8 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      1.7.0
-// @description  Автоответы по текстовому триггеру вроде !1 или по горячим клавишам, плюс боковая панель со сведениями о заказе (покупатель, исполнитель, дата загрузки и покупки, сколько товар пролежал).
+// @version      1.8.0
+// @description  Автоответы по триггеру или горячим клавишам, боковая панель со сведениями о заказе и статистикой покупателя, плюс помощник на модели: черновик ответа, вердикт по сроку, риск покупателя, разбор данных, резюме и вычитка.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
 // @license      MIT
@@ -12,6 +12,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      api.aitunnel.ru
 // ==/UserScript==
 
 /* eslint-env browser, greasemonkey */
@@ -84,8 +86,22 @@
         usePacks: false },
       { label: 'Тикетов по проблемным фасовкам', source: 'count', table: '*', column: '', value: '', exclude: false,
         linkSelector: 'Покупатель -> Подробнее#2', pages: 5, rowSelector: '', whereSelector: '', whereText: '',
-        usePacks: true }
+        usePacks: true },
+      { label: 'Доля проблемных', source: 'ratio', from: 'Тикетов по проблемным фасовкам', to: 'Заказов в списке' }
     ]
+  };
+
+  // Подключение модели (по умолчанию AiTunnel, подойдёт любой OpenAI-совместимый шлюз)
+  const DEFAULT_AI = {
+    enabled: false,
+    base: 'https://api.aitunnel.ru/v1',
+    key: '',
+    model: 'gpt-5-6-luna-pro',
+    temperature: 0.3,
+    maxTokens: 900,
+    contextLimit: 6000,
+    chatSelector: '',
+    tone: 'Вежливо, по-деловому, на «вы», без канцелярита и лишних извинений.'
   };
 
   const DEFAULT_CONFIG = {
@@ -95,7 +111,8 @@
     toasts: true,                      // всплывающие подсказки
     fab: true,                         // круглая кнопка на странице
     fabPos: null,                      // её положение, если пользователь перетащил
-    panel: DEFAULT_PANEL               // панель со сведениями о заказе
+    panel: DEFAULT_PANEL,              // панель со сведениями о заказе
+    ai: DEFAULT_AI                     // помощник на базе модели
   };
 
   // ========================== 2. ХРАНИЛИЩЕ ==========================
@@ -880,6 +897,8 @@
     '.side-head { display: flex; align-items: center; gap: 4px; padding: 8px 10px; border-bottom: 1px solid #e6e8ee; }',
     '.side-head .icon { padding: 2px 7px; font-size: 12px; }',
     '.side-body { overflow: auto; padding: 6px; }',
+    '.ai-row { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 8px; border-bottom: 1px solid #e6e8ee; }',
+    '.ai-row .icon { font-size: 14px; padding: 3px 8px; }',
     '.side-row { display: flex; gap: 8px; padding: 5px 6px; border-radius: 7px; }',
     '.side-row:hover { background: #f2f4f9; }',
     '.side-label { flex: 0 0 44%; color: #5b6273; }',
@@ -904,7 +923,7 @@
     '.pnow { flex: 1 1 100%; }',
     '@media (prefers-color-scheme: dark) {',
     '  .side { background: #1e222b; color: #e7e9ee; border-color: #313745; }',
-    '  .side-head { border-color: #313745; }',
+    '  .side-head, .ai-row { border-color: #313745; }',
     '  .side-row:hover { background: #262c38; }',
     '  .side-label, .side-empty { color: #a3abbd; }',
     '  .side-dim { color: #6f7891; }',
@@ -1102,6 +1121,7 @@
       hotkey: item.hotkey, trigger: item.trigger, label: item.labelRaw, text: item.text, send: item.send
     }));
     const side = JSON.parse(JSON.stringify(Object.assign({}, DEFAULT_PANEL, config.panel || {})));
+    const ai = Object.assign({}, DEFAULT_AI, config.ai || {});
     if (!Array.isArray(side.fields)) side.fields = [];
     const opts = {
       pickerHotkey: config.pickerHotkey,
@@ -1115,8 +1135,9 @@
     const tabList = h('button', 'tab', 'Автоответы');
     const tabText = h('button', 'tab', 'Текстом');
     const tabPanel = h('button', 'tab', 'Панель');
+    const tabAi = h('button', 'tab', 'ИИ');
     const tabOpts = h('button', 'tab', 'Настройки');
-    tabs.append(tabList, tabText, tabPanel, tabOpts);
+    tabs.append(tabList, tabText, tabPanel, tabAi, tabOpts);
     head.append(tabs);
     panel.appendChild(head);
 
@@ -1522,7 +1543,7 @@
 
           const source = h('select');
           [['label', 'по подписи'], ['css', 'по селектору'], ['between', 'разница дат'],
-            ['count', 'счётчик по списку']].forEach((pair) => {
+            ['count', 'счётчик по списку'], ['ratio', 'доля (A от B)']].forEach((pair) => {
             const option = h('option', null, pair[1]);
             option.value = pair[0];
             source.appendChild(option);
@@ -1538,7 +1559,7 @@
 
           const line2 = h('div', 'line');
           const extraLines = [];
-          if (field.source === 'count') {
+    if (field.source === 'count') {
             const textInput = (value, placeholder, apply) => {
               const input = h('input');
               input.type = 'text';
@@ -1603,7 +1624,8 @@
             onlyPacks.append(onlyBox, document.createTextNode('Только отмеченные фасовки'));
             linePacks.appendChild(onlyPacks);
             extraLines.push(linePacks);
-          } else if (field.source === 'between') {
+          } else if (field.source === 'between' || field.source === 'ratio') {
+            const isRatio = field.source === 'ratio';
             const names = side.fields.filter((other) => other !== field && other.label).map((other) => other.label);
             const build = (value, onChange) => {
               const select = h('select');
@@ -1617,8 +1639,8 @@
               return select;
             };
             line2.append(
-              h('span', 'pval', 'от'), build(field.from, (value) => { field.from = value; }),
-              h('span', 'pval', 'до'), build(field.to, (value) => { field.to = value; })
+              h('span', 'pval', isRatio ? 'считаем' : 'от'), build(field.from, (value) => { field.from = value; }),
+              h('span', 'pval', isRatio ? 'от' : 'до'), build(field.to, (value) => { field.to = value; })
             );
           } else if (field.source === 'css') {
             const selector = h('input');
@@ -1682,6 +1704,126 @@
       body.appendChild(add);
     }
 
+    function renderAiTab() {
+      cards = [];
+      const hint = h('p', 'hint');
+      hint.innerHTML = 'Помощник работает через OpenAI-совместимый шлюз (по умолчанию AiTunnel). ' +
+        'Числа он не считает — их считает панель и передаёт готовыми. Ничего не отправляется покупателю само: ' +
+        'любой результат сначала показывается вам.';
+      body.appendChild(hint);
+
+      const onLabel = h('label', 'check');
+      onLabel.style.marginTop = '0';
+      const onBox = h('input');
+      onBox.type = 'checkbox';
+      onBox.checked = !!ai.enabled;
+      onBox.addEventListener('change', () => { ai.enabled = onBox.checked; });
+      onLabel.append(onBox, document.createTextNode('Показывать кнопки ИИ в панели'));
+      body.appendChild(onLabel);
+
+      const field = (label, key, placeholder, isKey) => {
+        const wrap = h('label', null, label);
+        wrap.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:12px;';
+        const input = h('input');
+        input.type = isKey ? 'password' : 'text';
+        input.value = ai[key] == null ? '' : String(ai[key]);
+        input.placeholder = placeholder || '';
+        input.style.marginTop = '4px';
+        input.addEventListener('input', () => { ai[key] = input.value.trim(); });
+        wrap.appendChild(input);
+        body.appendChild(wrap);
+        return input;
+      };
+
+      field('Ключ шлюза (хранится только у вас в браузере)', 'key', 'sk-…', true);
+      const row = h('div', 'row');
+      const baseLabel = h('label', null, 'Адрес шлюза');
+      const baseInput = h('input');
+      baseInput.type = 'text';
+      baseInput.value = ai.base || '';
+      baseInput.placeholder = 'https://api.aitunnel.ru/v1';
+      baseInput.style.marginTop = '4px';
+      baseInput.addEventListener('input', () => { ai.base = baseInput.value.trim(); });
+      baseLabel.appendChild(baseInput);
+      const modelLabel = h('label', null, 'Модель');
+      const modelInput = h('input');
+      modelInput.type = 'text';
+      modelInput.value = ai.model || '';
+      modelInput.placeholder = 'gpt-5-6-luna-pro';
+      modelInput.style.marginTop = '4px';
+      modelInput.addEventListener('input', () => { ai.model = modelInput.value.trim(); });
+      modelLabel.appendChild(modelInput);
+      row.append(baseLabel, modelLabel);
+      body.appendChild(row);
+
+      const toneLabel = h('label', null, 'Тон ответов');
+      toneLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:12px;';
+      const toneArea = h('textarea', 'small');
+      toneArea.value = ai.tone || '';
+      toneArea.style.marginTop = '4px';
+      toneArea.addEventListener('input', () => { ai.tone = toneArea.value; });
+      toneLabel.appendChild(toneArea);
+      body.appendChild(toneLabel);
+
+      const chatLabel = h('label', null, 'Где переписка (пусто — берём текст страницы)');
+      chatLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:12px;';
+      const chatLine = h('div', 'line');
+      const chatInput = h('input');
+      chatInput.type = 'text';
+      chatInput.value = ai.chatSelector || '';
+      chatInput.placeholder = '.chat-message';
+      chatInput.addEventListener('input', () => { ai.chatSelector = chatInput.value.trim(); });
+      const chatPick = h('button', null, 'Указать');
+      chatPick.addEventListener('click', () => pickElement((path, el) => {
+        if (!el) return;
+        ai.chatSelector = shortSelector(el);
+        chatInput.value = ai.chatSelector;
+      }));
+      chatLine.append(chatInput, chatPick);
+      chatLabel.appendChild(chatLine);
+      body.appendChild(chatLabel);
+
+      const limits = h('div', 'row');
+      const ctxLabel = h('label', null, 'Сколько символов страницы отдавать');
+      const ctxInput = h('input', 'num');
+      ctxInput.type = 'text';
+      ctxInput.value = String(ai.contextLimit || '');
+      ctxInput.style.marginTop = '4px';
+      ctxInput.addEventListener('input', () => { ai.contextLimit = parseNumber(ctxInput.value); });
+      ctxLabel.appendChild(ctxInput);
+      const tempLabel = h('label', null, 'Температура (0 — строго, 1 — вольно)');
+      const tempInput = h('input', 'num');
+      tempInput.type = 'text';
+      tempInput.value = String(ai.temperature == null ? '' : ai.temperature);
+      tempInput.style.marginTop = '4px';
+      tempInput.addEventListener('input', () => { ai.temperature = parseNumber(tempInput.value); });
+      tempLabel.appendChild(tempInput);
+      limits.append(ctxLabel, tempLabel);
+      body.appendChild(limits);
+
+      const checkLine = h('div', 'line');
+      checkLine.style.marginTop = '14px';
+      const check = h('button', null, 'Проверить связь');
+      const checkResult = h('span', 'pval');
+      check.addEventListener('click', async () => {
+        const saved = config.ai;
+        config.ai = Object.assign({}, ai);                 // проверяем то, что сейчас в полях
+        checkResult.textContent = 'Проверяю…';
+        try {
+          const answer = await aiAsk('Отвечай одним словом.', 'Ответь словом: готово', { temperature: 0 });
+          checkResult.textContent = 'Шлюз ответил: ' + answer.slice(0, 40);
+        } catch (error) {
+          checkResult.textContent = 'Ошибка: ' + String(error && error.message || error);
+        } finally {
+          config.ai = saved;
+        }
+      });
+      checkLine.append(check, checkResult);
+      body.appendChild(checkLine);
+
+      count.textContent = 'Задач ИИ: ' + Object.keys(AI_TASKS).length;
+    }
+
     function renderOpts() {
       cards = [];
       const row = h('div', 'row');
@@ -1726,10 +1868,12 @@
       tabList.setAttribute('aria-selected', String(active === 'list'));
       tabText.setAttribute('aria-selected', String(active === 'text'));
       tabPanel.setAttribute('aria-selected', String(active === 'panel'));
+      tabAi.setAttribute('aria-selected', String(active === 'ai'));
       tabOpts.setAttribute('aria-selected', String(active === 'opts'));
       if (active === 'list') renderList();
       else if (active === 'text') renderText();
       else if (active === 'panel') renderPanelTab();
+      else if (active === 'ai') renderAiTab();
       else renderOpts();
     }
 
@@ -1740,6 +1884,7 @@
     tabList.addEventListener('click', () => show('list'));
     tabText.addEventListener('click', () => show('text'));
     tabPanel.addEventListener('click', () => show('panel'));
+    tabAi.addEventListener('click', () => show('ai'));
     tabOpts.addEventListener('click', () => show('opts'));
 
     resetBtn.addEventListener('click', () => {
@@ -1776,7 +1921,8 @@
         settingsHotkey: settings,
         toasts: opts.toasts,
         fab: opts.fab,
-        panel: side
+        panel: side,
+        ai: ai
       });
       hotkeyCache.clear();
       reloadTemplates();
@@ -2260,6 +2406,25 @@
       return { value: formatSpan(span), alarm: limit > 0 && span > limit * 86400000 };
     }
 
+    if (field.source === 'ratio') {
+const read = (name) => {
+  const other = (allFields || []).find((item) => item !== field && item.label === name);
+  if (!other) return null;
+  const raw = String(extractField(other, allFields).value || '');
+  if (!raw || raw === '…' || raw.indexOf('⚠') === 0) return null;
+  return { num: parseNumber(raw), partial: raw.indexOf('≥') !== -1 };
+};
+const from = read(field.from);
+const to = read(field.to);
+if (!from || !to || !to.num) return { value: '' };
+const sign = (from.partial || to.partial) ? '≈ ' : '';
+// показываем и формулу, и результат; 100% не потолок — перекос должен быть виден
+return {
+  value: sign + from.num + ' из ' + to.num + ' · ' + Math.round((from.num / to.num) * 100) + '%',
+  alarm: from.num > to.num
+};
+    }
+
     if (field.source === 'count') {
       if (!field.table && !field.rowSelector) return { value: '' };
       const scope = countScope(field);
@@ -2268,6 +2433,7 @@
 
       const pages = Math.max(1, Math.min(20, Math.round(Number(field.pages) || 1)));
       let total = 0;
+      let partial = false;                                 // страницы кончились или упёрлись в предел?
       let page = scope;
       for (let step = 0; step < pages; step++) {
         const counted = countRowsIn(field, page);
@@ -2277,7 +2443,10 @@
           break;                                     // на следующей странице списка уже нет
         }
         total += counted;
-        if (step === pages - 1) break;
+        if (step === pages - 1) {
+          partial = !!findNextPage(page);
+          break;
+        }
         const nextUrl = findNextPage(page);
         if (!nextUrl) break;
         if (new URL(nextUrl).origin !== location.origin) break;
@@ -2285,7 +2454,7 @@
         if (!nextDoc) return { value: '…' };               // ждём остальные страницы
         page = nextDoc;
       }
-      return { value: String(total) };
+      return { value: (partial ? '≥ ' : '') + total, partial: partial };
     }
 
     let nodes;
@@ -2382,6 +2551,7 @@
 
     const body = h('div', 'side-body');
     side.append(head, body);
+    if (aiConfig().enabled) side.insertBefore(aiButtons(), body);
     side.classList.toggle('folded', !!panel.collapsed);
     fold.textContent = panel.collapsed ? '+' : '–';
     root.appendChild(side);
@@ -2671,7 +2841,462 @@
     document.addEventListener('keydown', key, true);
   }
 
-  // ========================== 12. СТАРТ ==========================
+  // ========================== 12. ИИ ==========================
+
+  /**
+   * Работа с OpenAI-совместимым шлюзом (по умолчанию AiTunnel).
+   * Правило одно: всё, что можно посчитать кодом, считает код — модель только формулирует.
+   * Ничего не отправляется покупателю само: любой результат проходит через предпросмотр.
+   */
+
+  function aiConfig() {
+    return Object.assign({}, DEFAULT_AI, config.ai || {});
+  }
+
+  function aiUrl() {
+    const base = String(aiConfig().base || DEFAULT_AI.base).trim().replace(/\/+$/, '');
+    if (/\/chat\/completions$/i.test(base)) return base;
+    return /\/v\d+$/i.test(base) ? base + '/chat/completions' : base + '/v1/chat/completions';
+  }
+
+  /** Запрос к модели. В браузере на чужой домен ходит только GM_xmlhttpRequest. */
+  function aiAsk(system, user, options) {
+    const conf = aiConfig();
+    const opts = options || {};
+    return new Promise((resolve, reject) => {
+      if (!String(conf.key || '').trim()) {
+        reject(new Error('Не указан ключ — откройте настройки, вкладка «ИИ»'));
+        return;
+      }
+      if (typeof GM_xmlhttpRequest !== 'function') {
+        reject(new Error('Нет доступа GM_xmlhttpRequest — переустановите скрипт в Tampermonkey'));
+        return;
+      }
+      const body = {
+        model: String(conf.model || DEFAULT_AI.model).trim(),
+        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+        temperature: opts.temperature != null ? opts.temperature : Number(conf.temperature) || 0.3,
+        max_tokens: Number(conf.maxTokens) || 900
+      };
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: aiUrl(),
+        timeout: 90000,
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': 'Bearer ' + String(conf.key).trim()
+        },
+        data: JSON.stringify(body),
+        onload: (response) => {
+          let data = null;
+          try { data = JSON.parse(response.responseText || '{}'); } catch (e) { data = null; }
+          if (response.status < 200 || response.status >= 300) {
+            const message = data && data.error && (data.error.message || data.error) || ('HTTP ' + response.status);
+            reject(new Error(String(message).slice(0, 300)));
+            return;
+          }
+          const choice = data && data.choices && data.choices[0];
+          const content = choice && choice.message && choice.message.content;
+          const text = typeof content === 'string'
+            ? content
+            : (Array.isArray(content) ? content.map((part) => part && (part.text || '')).join('') : '');
+          if (!text.trim()) {
+            reject(new Error('Модель вернула пустой ответ'));
+            return;
+          }
+          resolve(text.trim());
+        },
+        onerror: () => reject(new Error('Сеть недоступна или шлюз отклонил запрос')),
+        ontimeout: () => reject(new Error('Шлюз не ответил за 90 секунд'))
+      });
+    });
+  }
+
+  /** Модели иногда заворачивают JSON в ```-блок — достаём его аккуратно. */
+  function parseJsonLoose(text) {
+    let value = String(text || '').trim();
+    const fence = /```(?:json)?\s*([\s\S]*?)```/i.exec(value);
+    if (fence) value = fence[1].trim();
+    const start = value.search(/[[{]/);
+    if (start > 0) value = value.slice(start);
+    const end = Math.max(value.lastIndexOf('}'), value.lastIndexOf(']'));
+    if (end !== -1) value = value.slice(0, end + 1);
+    try { return JSON.parse(value); } catch (e) { return null; }
+  }
+
+  // ---------- Контекст страницы ----------
+
+  /** Текст переписки: по селектору из настроек, иначе — видимый текст страницы. */
+  function aiPageText() {
+    const conf = aiConfig();
+    const limit = Math.max(500, Number(conf.contextLimit) || 6000);
+    let text = '';
+    if (conf.chatSelector) {
+      try {
+        const nodes = Array.prototype.slice.call(document.querySelectorAll(conf.chatSelector));
+        text = nodes.map((node) => nodeText(node)).filter(Boolean).join('\n');
+      } catch (e) { text = ''; }
+    }
+    if (!text) text = String(document.body && document.body.innerText || '').replace(/\n{3,}/g, '\n\n');
+    text = text.trim();
+    return text.length > limit ? '…\n' + text.slice(-limit) : text;   // хвост важнее начала
+  }
+
+  function aiDraftText() {
+    const el = resolveTarget();
+    if (!el) return '';
+    return (el.value !== undefined ? el.value : nodeText(el)).trim();
+  }
+
+  /** Всё, что панель уже вытащила со страницы: подписи, счётчики, даты, сроки. */
+  function aiFacts() {
+    const panel = panelConfig();
+    const fields = (panel.fields || []).filter((field) => field && (field.label || field.query || field.selector));
+    const out = [];
+    fields.forEach((field) => {
+      const result = extractField(field, fields);
+      if (!result.value || result.value === '…') return;
+      out.push({ label: field.label || field.query, value: result.value, alarm: !!result.alarm });
+    });
+    return out;
+  }
+
+  function aiContext() {
+    return {
+      url: location.href,
+      title: document.title,
+      facts: aiFacts(),
+      chat: aiPageText(),
+      draft: aiDraftText(),
+      limitDays: Number(panelConfig().limitDays) || 0
+    };
+  }
+
+  function factsBlock(context) {
+    if (!context.facts.length) return 'Данные со страницы не найдены.';
+    return context.facts
+      .map((fact) => '- ' + fact.label + ': ' + fact.value + (fact.alarm ? '  ← превышен порог' : ''))
+      .join('\n');
+  }
+
+  const AI_RULES = [
+    'Ты помощник оператора поддержки. Отвечай по-русски.',
+    'Все числа и даты уже посчитаны и приведены в блоке ДАННЫЕ. Не пересчитывай их и не придумывай новых.',
+    'Если данных не хватает — скажи об этом одной строкой, не догадывайся.',
+    'Не обещай того, чего нет в данных (компенсации, сроки, доставку).',
+    'Без markdown, без вступлений вроде «Конечно» и без подписи.'
+  ].join(' ');
+
+  // ---------- Задачи ----------
+
+  const AI_TASKS = {
+    reply: {
+      icon: '✍',
+      title: 'Черновик ответа',
+      kind: 'text',
+      system: AI_RULES + ' Пиши готовый текст ответа покупателю — только сам текст, без пояснений.',
+      build: (context, extra) => [
+        'ЗАДАЧА: напиши ответ покупателю по этому обращению.',
+        extra ? 'ДОПОЛНИТЕЛЬНО: ' + extra : '',
+        'ТОН: ' + (aiConfig().tone || DEFAULT_AI.tone),
+        '',
+        'ДАННЫЕ:', factsBlock(context),
+        '',
+        'ПЕРЕПИСКА И СТРАНИЦА:', context.chat
+      ].filter(Boolean).join('\n')
+    },
+
+    shelf: {
+      icon: '⏳',
+      title: 'Вердикт по сроку',
+      kind: 'text',
+      system: AI_RULES + ' Ты формулируешь вывод по сроку годности. Арифметику не делаешь: разница дат уже посчитана.',
+      build: (context) => [
+        'ЗАДАЧА: по готовым данным сформулируй, мог ли выйти срок годности, и что ответить покупателю.',
+        'Порог свежести: ' + (context.limitDays ? context.limitDays + ' дн.' : 'не задан'),
+        'Формат: первая строка — вывод (вышел / не вышел / данных не хватает), дальше 1–3 строки обоснования, потом строка «Ответ покупателю:» и текст ответа.',
+        '',
+        'ДАННЫЕ:', factsBlock(context)
+      ].join('\n')
+    },
+
+    risk: {
+      icon: '⚖',
+      title: 'Риск покупателя',
+      kind: 'json',
+      system: AI_RULES + ' Верни только JSON: {"verdict":"низкий|средний|высокий","score":0-100,"reasons":["…"],"advice":"…"}.',
+      build: (context) => [
+        'ЗАДАЧА: оцени, похоже ли поведение покупателя на злоупотребление (частые тикеты и отмены при малом числе заказов).',
+        'Оценивай только по приведённым числам. Мало данных — verdict «низкий» и причина «мало данных».',
+        '',
+        'ДАННЫЕ:', factsBlock(context)
+      ].join('\n')
+    },
+
+    fields: {
+      icon: '📦',
+      title: 'Разобрать данные',
+      kind: 'json',
+      system: AI_RULES + ' Верни только JSON вида {"поле":"значение"} с найденными данными. Ничего не выдумывай, отсутствующее пропусти.',
+      build: (context) => [
+        'ЗАДАЧА: вытащи из переписки данные для отправки: индекс, ФИО, адрес, количество, трек-номер, номер заказа, телефон.',
+        'Ключи — по-русски. Если значения нет — не добавляй ключ.',
+        '',
+        'ПЕРЕПИСКА:', context.chat
+      ].join('\n')
+    },
+
+    summary: {
+      icon: '📝',
+      title: 'Резюме переписки',
+      kind: 'text',
+      system: AI_RULES + ' Дай сжатую выжимку: 2–4 строки, без воды.',
+      build: (context) => [
+        'ЗАДАЧА: коротко изложи суть обращения: что просит покупатель, что уже ответили, что осталось сделать.',
+        '',
+        'ДАННЫЕ:', factsBlock(context),
+        '',
+        'ПЕРЕПИСКА:', context.chat
+      ].join('\n')
+    },
+
+    proof: {
+      icon: '✅',
+      title: 'Проверить мой ответ',
+      kind: 'json',
+      system: AI_RULES + ' Верни только JSON: {"issues":[{"type":"тон|факт|обещание|ошибка","text":"…"}],"fixed":"исправленный текст"}.',
+      build: (context) => [
+        'ЗАДАЧА: проверь черновик оператора перед отправкой: тон, соответствие данным, лишние обещания, опечатки.',
+        'Если всё в порядке — issues пустой, fixed равен исходному тексту.',
+        'ТОН: ' + (aiConfig().tone || DEFAULT_AI.tone),
+        '',
+        'ДАННЫЕ:', factsBlock(context),
+        '',
+        'ЧЕРНОВИК ОПЕРАТОРА:', context.draft || '(поле ввода пустое)'
+      ].join('\n')
+    }
+  };
+
+  // ---------- Запуск и показ результата ----------
+
+  let aiBusy = false;
+
+  async function runAiTask(taskId, extra) {
+    const task = AI_TASKS[taskId];
+    if (!task || aiBusy) return;
+    if (taskId === 'proof' && !aiDraftText()) {
+      toast('Сначала напишите черновик в поле ответа');
+      return;
+    }
+    const context = aiContext();
+    const prompt = task.build(context, extra);
+    aiBusy = true;
+    showAiWindow(task, { state: 'loading', prompt: prompt });
+    try {
+      const answer = await aiAsk(task.system, prompt, {});
+      const parsed = task.kind === 'json' ? parseJsonLoose(answer) : answer;
+      if (task.kind === 'json' && !parsed) {
+        showAiWindow(task, { state: 'text', text: answer, prompt: prompt, note: 'Модель ответила не JSON — показываю как есть' });
+      } else {
+        showAiWindow(task, { state: task.kind, data: parsed, text: answer, prompt: prompt, taskId: taskId });
+      }
+    } catch (error) {
+      showAiWindow(task, { state: 'error', text: String(error && error.message || error), prompt: prompt });
+    } finally {
+      aiBusy = false;
+    }
+  }
+
+  function showAiWindow(task, result) {
+    const overlay = createOverlay();
+    const panel = h('div', 'panel');
+    overlay.appendChild(panel);
+
+    const head = h('div', 'head');
+    head.append(h('h2', null, task.icon + ' ' + task.title), h('span', 'spacer'));
+    panel.appendChild(head);
+
+    const body = h('div', 'body');
+    panel.appendChild(body);
+
+    const foot = h('div', 'foot');
+    panel.appendChild(foot);
+
+    if (result.state === 'loading') {
+      body.appendChild(h('div', 'side-empty', 'Модель думает…'));
+      const cancel = h('button', null, 'Закрыть');
+      cancel.addEventListener('click', closeOverlay);
+      foot.append(h('span', 'spacer'), cancel);
+      return;
+    }
+
+    if (result.state === 'error') {
+      const box = h('div', 'notes');
+      box.textContent = result.text;
+      body.appendChild(box);
+    } else if (result.state === 'json' && result.data) {
+      body.appendChild(renderAiJson(result.taskId, result.data));
+    } else {
+      if (result.note) {
+        const note = h('div', 'notes');
+        note.textContent = result.note;
+        body.appendChild(note);
+      }
+      const area = h('textarea');
+      area.value = String(result.text || '');
+      area.spellcheck = false;
+      area.style.minHeight = '26vh';
+      body.appendChild(area);
+      result.area = area;
+    }
+
+    // что именно ушло в модель — чтобы результату можно было верить
+    const details = document.createElement('details');
+    details.style.marginTop = '10px';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Что отправлено модели';
+    summary.style.cssText = 'cursor:pointer;font-size:12px;color:#5b6273';
+    const pre = h('div', 'pval');
+    pre.style.cssText = 'white-space:pre-wrap;margin-top:6px;max-height:26vh;overflow:auto';
+    pre.textContent = result.prompt || '';
+    details.append(summary, pre);
+    body.appendChild(details);
+
+    const insertText = () => (result.area ? result.area.value : aiTextOf(result));
+    const target = resolveTarget();
+
+    if (result.state !== 'error') {
+      const copy = h('button', null, 'Скопировать');
+      copy.addEventListener('click', () => {
+        try { navigator.clipboard.writeText(insertText()); toast('Скопировано'); } catch (e) { toast('Не удалось скопировать'); }
+      });
+      foot.appendChild(copy);
+
+      if (target && insertText()) {
+        const replaces = result.taskId === 'proof';        // исправленный текст заменяет черновик целиком
+        const paste = h('button', 'primary', replaces ? 'Заменить в поле' : 'Вставить в поле');
+        paste.addEventListener('click', () => {
+          const text = insertText();
+          closeOverlay();
+          if (replaces) selectAllIn(target);
+          insertTemplateText(target, text);
+          toast(replaces ? 'Заменено — проверьте и отправьте сами' : 'Вставлено — проверьте и отправьте сами');
+        });
+        foot.appendChild(paste);
+      }
+    }
+
+    if (result.state === 'text' && result.taskId) {
+      [['короче', 'Сделай короче'], ['мягче', 'Сделай мягче'], ['строже', 'Сделай строже и суше']].forEach((pair) => {
+        const button = h('button', 'icon', pair[0]);
+        button.addEventListener('click', () => runAiTask(result.taskId, pair[1]));
+        foot.appendChild(button);
+      });
+    }
+
+    const close = h('button', null, 'Закрыть');
+    close.addEventListener('click', closeOverlay);
+    foot.append(h('span', 'spacer'), close);
+  }
+
+  /** Выделяет всё содержимое поля, чтобы следующая вставка его заменила. */
+  function selectAllIn(el) {
+    try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); }
+    if (el.value !== undefined) {
+      try { el.setSelectionRange(0, el.value.length); } catch (e) {}
+      return;
+    }
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function aiTextOf(result) {
+    if (result.state === 'json' && result.data) {
+      if (result.taskId === 'proof' && result.data.fixed) return String(result.data.fixed);
+      return Object.keys(result.data).map((key) => key + ': ' + result.data[key]).join('\n');
+    }
+    return String(result.text || '');
+  }
+
+  function renderAiJson(taskId, data) {
+    const box = h('div');
+
+    if (taskId === 'risk') {
+      const colors = { низкий: '#1f8a4c', средний: '#b26a00', высокий: '#b3261e' };
+      const verdict = String(data.verdict || '—').toLowerCase();
+      const head = h('div', null, 'Риск: ' + verdict + (data.score != null ? ' · ' + data.score + '/100' : ''));
+      head.style.cssText = 'font-size:16px;font-weight:700;margin-bottom:8px;color:' + (colors[verdict] || 'inherit');
+      box.appendChild(head);
+      (data.reasons || []).forEach((reason) => {
+        const row = h('div', 'side-row');
+        row.appendChild(h('span', 'side-value', '• ' + reason));
+        box.appendChild(row);
+      });
+      if (data.advice) {
+        const advice = h('p', 'hint');
+        advice.style.marginTop = '10px';
+        advice.textContent = 'Рекомендация: ' + data.advice;
+        box.appendChild(advice);
+      }
+      return box;
+    }
+
+    if (taskId === 'proof') {
+      const issues = data.issues || [];
+      if (!issues.length) {
+        box.appendChild(h('div', 'side-empty', 'Замечаний нет — текст можно отправлять'));
+      } else {
+        issues.forEach((issue) => {
+          const row = h('div', 'side-row side-alarm');
+          row.append(h('span', 'side-label', issue.type || 'замечание'), h('span', 'side-value', issue.text || ''));
+          box.appendChild(row);
+        });
+      }
+      if (data.fixed) {
+        const label = h('p', 'hint');
+        label.style.margin = '12px 0 4px';
+        label.textContent = 'Исправленный вариант:';
+        const area = h('textarea');
+        area.value = String(data.fixed);
+        area.style.minHeight = '18vh';
+        box.append(label, area);
+      }
+      return box;
+    }
+
+    Object.keys(data).forEach((key) => {
+      const value = data[key];
+      if (value == null || value === '') return;
+      const row = h('div', 'side-row');
+      row.append(h('span', 'side-label', key), h('span', 'side-value', String(value)));
+      row.title = 'Нажмите, чтобы скопировать';
+      row.addEventListener('click', () => {
+        try { navigator.clipboard.writeText(String(value)); toast('Скопировано: ' + value); } catch (e) {}
+      });
+      box.appendChild(row);
+    });
+    if (!box.childNodes.length) box.appendChild(h('div', 'side-empty', 'Модель ничего не нашла'));
+    return box;
+  }
+
+  /** Ряд кнопок ИИ в шапке боковой панели. */
+  function aiButtons() {
+    const row = h('div', 'ai-row');
+    Object.keys(AI_TASKS).forEach((taskId) => {
+      const task = AI_TASKS[taskId];
+      const button = h('button', 'icon', task.icon);
+      button.title = task.title;
+      button.addEventListener('click', () => runAiTask(taskId));
+      row.appendChild(button);
+    });
+    return row;
+  }
+
+  // ========================== 13. СТАРТ ==========================
 
   reloadTemplates();
   ensureFab();
