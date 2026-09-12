@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      2.7.0
+// @version      2.8.0
 // @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам, помощник на модели и автоподстановка проверенных шагов.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -66,15 +66,25 @@
     site: 'ieq37.com/*',               // маски адресов, по одной в строке; пусто — панель не показывается
     limitDays: 7,                      // сколько дней товар считается свежим
     hideEmpty: true,                   // не показывать строки, для которых на странице нет данных
+    compact: true,                     // не повторять числа, которые уже видны в строке с долей
     packs: { url: '~/product-packing/list/', column: 'Товар', selector: '', values: [], counted: [] },
     fields: [
       // Блок «О покупателе» на странице тикета — читается по подписям
       { label: 'Покупатель', source: 'label', query: 'Покупатель', selector: '', attr: '', regex: '', mode: 'text' },
       { label: 'Заказов всего', source: 'label', query: 'Заказов всего', selector: '', attr: '', regex: '', mode: 'text' },
+      // «Заказов всего / оплаченных: 10 / 1» — в статистике считается только оплаченное
+      { label: 'Оплаченных заказов', source: 'label', query: 'Заказов всего / оплаченных', selector: '', attr: '',
+        regex: '(\\d+)\\s*$', mode: 'text' },
       { label: 'Сумма заказов', source: 'label', query: 'Общая сумма заказов', selector: '', attr: '', regex: '', mode: 'text' },
       { label: 'За 30 дней', source: 'label', query: 'Заказы за последние 30 дней', selector: '', attr: '', regex: '', mode: 'text' },
       { label: 'Средний чек', source: 'label', query: 'Средний чек', selector: '', attr: '', regex: '', mode: 'text' },
       { label: 'Тикетов всего', source: 'label', query: 'Кол-во тикетов всего', selector: '', attr: '', regex: '', mode: 'text' },
+      { label: 'Замен', source: 'label', query: 'Кол-во замен', selector: '', attr: '', regex: '', mode: 'text' },
+      { label: 'Ненаходов', source: 'label', query: 'Кол-во ненаходов', selector: '', attr: '', regex: '', mode: 'text' },
+      { label: 'Купонов', source: 'label', query: 'Кол-во активированных купонов', selector: '', attr: '', regex: '',
+        mode: 'text' },
+      { label: 'Дата регистрации', source: 'label', query: 'Дата регистрации', selector: '', attr: '', regex: '',
+        mode: 'text' },
 
       // Страница заказа: не вышел ли срок годности
       { label: 'Дата загрузки', source: 'label', query: 'Дата загрузки', selector: '', attr: '', regex: '', mode: 'text' },
@@ -82,7 +92,10 @@
       { label: 'Пролежал до покупки', source: 'between', from: 'Дата загрузки', to: 'Дата покупки' },
 
       // Полные списки покупателя: «Покупатель» → его страница → «Подробнее»
-      { label: 'Заказов в списке', source: 'count', table: '*', column: '', value: '', exclude: false,
+      // неоплаченный заказ — не заказ: отсекаем отменённые и неоплаченные, а не перечисляем «хорошие»
+      // статусы. Незнакомое слово в колонке тогда не обнуляет знаменатель, а просто остаётся в счёте.
+      { label: 'Заказов в списке', source: 'count', table: '*', column: 'Статус',
+        value: 'отмен, не оплач, ожидает оплат, возврат', exclude: true,
         linkSelector: 'Покупатель -> Подробнее', pages: 5, rowSelector: '', whereSelector: '', whereText: '',
         usePacks: false },
       { label: 'Тикетов в списке', source: 'count', table: '*', column: '', value: '', exclude: false,
@@ -117,6 +130,7 @@
     contextLimit: 6000,
     chatSelector: '',
     tone: 'Вежливо, по-деловому, на «вы», без канцелярита и лишних извинений.',
+    ruleFirst: false,                  // правила только подсказывают: решает модель, прочитав переписку
     auto: DEFAULT_AUTO,
     playbook: [
       '# Шаги разбирательства. «если» — слова-правило (сработает без модели),',
@@ -177,6 +191,9 @@
     packColumn: 'Фасовка',
     answerColumn: 'Последний ответ',   // колонка с последним ответом
     waitingSelector: '',               // признак «ждём ответа» прямо в строке списка
+    waitingUrl: '',                    // адрес отфильтрованного списка (пусто — текущая страница)
+    waitingAll: false,                 // в этом списке ждут ответа все строки
+    waitingPages: 10,                  // сколько страниц обойти у списка неотвеченных
     refreshMin: 5,
     notify: false
   };
@@ -272,6 +289,28 @@
         const has = (label) => fields.some((field) => field && field.label === label);
         const hasRatio = fields.some((field) => field && field.source === 'ratio');
         if (sample && !hasRatio && has(sample.from) && has(sample.to)) fields.push(Object.assign({}, sample));
+      }
+    }
+
+    if (done.indexOf('paid1') === -1) {
+      done.push('paid1');
+      if (fields && fields.length) {
+        const has = (label) => fields.some((field) => field && field.label === label);
+        ['Оплаченных заказов', 'Замен', 'Ненаходов', 'Купонов', 'Дата регистрации'].forEach((label) => {
+          if (has(label)) return;
+          const sample = DEFAULT_PANEL.fields.filter((field) => field.label === label)[0];
+          if (sample) fields.push(Object.assign({}, sample));
+        });
+        // в знаменателе должны стоять оплаченные заказы, а не все подряд
+        fields.forEach((field) => {
+          if (!field || field.label !== 'Заказов в списке' || field.source !== 'count') return;
+          if (String(field.column || '').trim()) return;               // фильтр уже настроен — не трогаем
+          const sample = DEFAULT_PANEL.fields.filter((item) => item.label === 'Заказов в списке')[0];
+          if (!sample) return;
+          field.column = sample.column;
+          field.value = sample.value;
+          field.exclude = true;
+        });
       }
     }
 
@@ -1561,6 +1600,16 @@
       hideLabel.append(hideBox, document.createTextNode('Скрывать строки, для которых на странице нет данных'));
       body.appendChild(hideLabel);
 
+      const foldLabel = h('label', 'check');
+      foldLabel.style.marginTop = '6px';
+      const foldBox = h('input');
+      foldBox.type = 'checkbox';
+      foldBox.checked = side.compact !== false;
+      foldBox.addEventListener('change', () => { side.compact = foldBox.checked; });
+      foldLabel.append(foldBox,
+        document.createTextNode('Складывать строки, числа которых уже видны в доле («17 из 86 · 20%»)'));
+      body.appendChild(foldLabel);
+
       const row = h('div', 'row');
       const titleLabel = h('label', null, 'Заголовок панели');
       const titleInput = h('input');
@@ -1974,6 +2023,61 @@
       waitLine.append(waitInput, waitPick);
       waitBox.appendChild(waitLine);
       waitBox.appendChild(text('Колонка последнего ответа', 'answerColumn', 'Последний ответ'));
+
+      const urlLabel = h('label', null, 'Адрес списка неотвеченных (пусто — текущая страница списка)');
+      urlLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:12px;';
+      const urlLine = h('div', 'line');
+      const urlInput = h('input');
+      urlInput.type = 'text';
+      urlInput.value = queue.waitingUrl || '';
+      urlInput.placeholder = '~/ticket/list/?status=open';
+      urlInput.addEventListener('input', () => { queue.waitingUrl = urlInput.value.trim(); });
+      const urlTake = h('button', null, 'Взять текущий адрес');
+      urlTake.title = 'Поставьте на сайте нужный фильтр, откройте список и нажмите сюда';
+      urlTake.addEventListener('click', () => {
+        const code = location.pathname.split('/').filter(Boolean)[0] || '';
+        const here = location.href.slice(location.origin.length);
+        queue.waitingUrl = code ? here.replace('/' + code + '/', '~/') : here;
+        urlInput.value = queue.waitingUrl;
+      });
+      urlLine.append(urlInput, urlTake);
+      urlLabel.appendChild(urlLine);
+      waitBox.appendChild(urlLabel);
+
+      const allLabel = h('label', 'check');
+      const allBox = h('input');
+      allBox.type = 'checkbox';
+      allBox.checked = !!queue.waitingAll;
+      allBox.addEventListener('change', () => { queue.waitingAll = allBox.checked; });
+      allLabel.append(allBox, document.createTextNode('В этом списке ждут ответа все строки (фильтр уже стоит)'));
+      waitBox.appendChild(allLabel);
+
+      waitBox.appendChild(text('Сколько страниц обойти у этого списка', 'waitingPages', '10', 'num'));
+
+      const waitCheck = h('div', 'line');
+      waitCheck.style.marginTop = '10px';
+      const waitRun = h('button', null, 'Проверить неотвеченные');
+      const waitResult = h('span', 'pval');
+      waitRun.addEventListener('click', async () => {
+        const saved = config.queue;
+        config.queue = Object.assign({}, queue);
+        waitResult.textContent = 'Читаю…';
+        try {
+          const data = await fetchWaiting(true);
+          const rule = waitingRule(config.queue, data.columns, true);
+          const count = data.rows.filter((row) => isWaiting(row, rule)).length;
+          waitResult.textContent = data.error
+            ? data.error
+            : 'Прочитано страниц: ' + data.pages + (data.more ? ' (есть ещё)' : '') +
+              ' · строк ' + data.rows.length + ' · ждут ответа ' + count + ' · признак: ' + rule.note;
+        } catch (error) {
+          waitResult.textContent = 'Ошибка: ' + String(error && error.message || error);
+        } finally {
+          config.queue = saved;
+        }
+      });
+      waitCheck.append(waitRun, waitResult);
+      waitBox.appendChild(waitCheck);
       body.appendChild(waitBox);
 
       const notifyLabel = h('label', 'check');
@@ -2361,6 +2465,17 @@
         'непустое поле не трогает, тексты с <code>{ask:…}</code> пропускает, и берёт только шаги, набравшие ' +
         'нужную долю по журналу. Доля считается от решённых предложений: принято ÷ (принято + закрыто).';
       autoBox.appendChild(autoHint);
+
+      const ruleLabel = h('label', 'check');
+      const ruleBox = h('input');
+      ruleBox.type = 'checkbox';
+      ruleBox.checked = !!ai.ruleFirst;
+      ruleBox.addEventListener('change', () => { ai.ruleFirst = ruleBox.checked; });
+      ruleLabel.title = 'Быстро и бесплатно, но покупатель мог уже ответить на вопрос шага — ' +
+        'этого правило не видит';
+      ruleLabel.append(ruleBox,
+        document.createTextNode('Правила «если» решают сами, без модели (иначе они только подсказывают)'));
+      body.appendChild(ruleLabel);
 
       const autoOn = h('label', 'check');
       const autoOnBox = h('input');
@@ -3275,7 +3390,8 @@
    * признак, который ставит сам сайт (класс, иконка, подсветка строки), потом пустая
    * ячейка последнего ответа. Если не настроено ни то ни другое — не гадаем.
    */
-  function waitingRule(conf, columns) {
+  function waitingRule(conf, columns, whole) {
+    if (whole && conf.waitingAll) return { kind: 'all', note: 'весь отфильтрованный список' };
     const selector = String(conf.waitingSelector || '').trim();
     if (selector) return { kind: 'selector', selector: selector, note: 'признак в строке' };
     const column = matchColumn(columns, conf.answerColumn || '');
@@ -3285,6 +3401,7 @@
 
   function isWaiting(row, rule) {
     if (!rule || rule.kind === 'none') return false;
+    if (rule.kind === 'all') return true;
     if (rule.kind === 'selector') {
       const node = row.node;
       if (!node) return false;
@@ -3312,7 +3429,7 @@
     const resolved = resolveColumns(queueConfig(), parsed.columns);
     const conf = resolved.conf;
     const missing = (name) => resolved.missing.indexOf(String(name || '').trim()) !== -1;
-    const rule = waitingRule(conf, parsed.columns);
+    const rule = waitingRule(conf, parsed.columns, true);
 
     const counted = ((panelConfig().packs || {}).counted || []).map(normalizeText);
     const statuses = new Map();
@@ -3376,42 +3493,60 @@
       return box;
     }
 
+    // основа — полный обход списка; пока он не прочитан, показываем открытую страницу
+    const full = waitingCache.rows.length || waitingCache.error || waitingCache.pages;
+    const rows = full ? waitingCache.rows.filter((row) => isWaiting(row, summary.rule)) : summary.waiting;
+    const scope = full
+      ? (waitingCache.error ? waitingCache.error
+         : 'по ' + waitingCache.pages + ' стр.' + (waitingCache.more ? ', есть ещё' : '') +
+           ' · всего строк ' + waitingCache.rows.length)
+      : 'пока только эта страница из ' + summary.total + ' строк';
+
     const head = h('div', 'side-note');
-    head.textContent = 'Ждут ответа: ' + summary.waiting.length + ' из ' + summary.total +
-      ' на этой странице · ' + summary.rule.note;
+    head.textContent = 'Ждут ответа: ' + rows.length + ' · ' + scope;
+    head.title = 'Признак: ' + summary.rule.note;
     box.appendChild(head);
 
-    // в панели — только открытая страница; очередь обходит все и помнит заметки
-    if (queueCache.rows.length > summary.total) {
-      const whole = queueCache.rows.filter((row) => isWaiting(row, summary.rule)).length;
-      const row = h('div', 'side-row');
-      row.style.cursor = 'pointer';
-      row.title = 'Открыть очередь по всем страницам';
-      row.append(h('span', 'side-label', 'Во всей очереди'),
-                 h('span', 'side-value', whole + ' из ' + queueCache.rows.length + ' →'));
-      row.addEventListener('click', () => openQueue('list', { waiting: true }));
-      box.appendChild(row);
-    }
-
-    if (!summary.waiting.length) {
-      box.appendChild(h('div', 'side-empty', 'Все отвечены'));
+    if (!rows.length) {
+      box.appendChild(h('div', 'side-empty', waitingCache.error ? 'Список не прочитан' : 'Все отвечены'));
       return box;
     }
 
-    summary.waiting.slice(0, 12).forEach((item) => {
+    rows.slice(0, 12).forEach((item) => {
+      const title = item.title !== undefined ? item.title : firstValue(item);
+      const sub = item.sub !== undefined ? item.sub : rowSummary(item);
       const row = h('div', 'side-row');
-      row.append(h('span', 'side-label', item.title), h('span', 'side-value side-dim', item.sub));
-      if (item.href) {
+      row.append(h('span', 'side-label', title), h('span', 'side-value side-dim', sub));
+      const href = item.href;
+      if (href) {
         row.style.cursor = 'pointer';
         row.title = 'Открыть тикет в новой вкладке';
-        row.addEventListener('click', () => window.open(item.href, '_blank', 'noopener'));
+        row.addEventListener('click', () => window.open(href, '_blank', 'noopener'));
       }
       box.appendChild(row);
     });
-    if (summary.waiting.length > 12) {
-      box.appendChild(h('div', 'side-empty', 'и ещё ' + (summary.waiting.length - 12) + ' — смотрите в очереди ☰'));
+    if (rows.length > 12) {
+      const more = h('div', 'side-row');
+      more.style.cursor = 'pointer';
+      more.title = 'Открыть очередь с фильтром «ждут ответа»';
+      more.append(h('span', 'side-label', 'и ещё ' + (rows.length - 12)),
+                  h('span', 'side-value', 'открыть очередь →'));
+      more.addEventListener('click', () => openQueue('list', { waiting: true }));
+      box.appendChild(more);
     }
     return box;
+  }
+
+  function firstValue(row) {
+    const keys = Object.keys(row.values || {});
+    return String((keys.length && row.values[keys[0]]) || row.key || '').slice(0, 24);
+  }
+
+  /** Короткая подпись строки списка: курьер и дата, если такие колонки есть. */
+  function rowSummary(row) {
+    const conf = resolveColumns(queueConfig(), Object.keys(row.values || {})).conf;
+    return [row.values[conf.courierColumn], row.values[conf.dateColumn]]
+      .filter(Boolean).join(' · ').slice(0, 48);
   }
 
   /** Перечитывает значения со страницы и обновляет строки панели. */
@@ -3431,8 +3566,20 @@
       return;
     }
 
+    // строка с долей уже показывает оба числа — повторять их отдельными строками незачем
+    const folded = {};
+    if (panel.compact !== false) {
+      fields.forEach((field) => {
+        if (!field || field.source !== 'ratio') return;
+        if (!extractField(field, fields).value) return;
+        folded[field.from] = field.label;
+        folded[field.to] = field.label;
+      });
+    }
+
     let shown = 0;
     fields.forEach((field) => {
+      if (folded[field.label] && field.source !== 'ratio') return;
       const result = extractField(field, fields);
       const value = result.value;
       if (!value && panel.hideEmpty) return;            // на этой странице такого поля нет
@@ -3442,8 +3589,10 @@
         h('span', 'side-label', field.label || field.query || field.selector),
         h('span', 'side-value' + (value ? '' : ' side-dim'), value || '—')
       );
+      if (field.source === 'ratio') row.title = field.from + ' ÷ ' + field.to;
       if (value) {
-        row.title = 'Нажмите, чтобы скопировать';
+        row.title = (field.source === 'ratio' ? field.from + ' ÷ ' + field.to + '. ' : '') +
+          'Нажмите, чтобы скопировать';
         row.addEventListener('click', () => {
           try {
             navigator.clipboard.writeText(value);
@@ -3468,11 +3617,39 @@
         body.appendChild(row);
       });
       body.appendChild(waitingBlock(summary));
-    } else if (!shown) {
-      body.appendChild(h('div', 'side-empty', 'На этой странице данных для панели нет'));
+      refreshWaiting();
+    } else {
+      if (!shown) body.appendChild(h('div', 'side-empty', 'На этой странице данных для панели нет'));
+      if (String(queueConfig().waitingUrl || '').trim()) {
+        const rule = waitingRule(queueConfig(), waitingCache.columns, true);
+        const count = waitingCache.rows.filter((row) => isWaiting(row, rule)).length;
+        const row = h('div', 'side-row');
+        row.style.cursor = 'pointer';
+        row.title = 'Открыть очередь с фильтром «ждут ответа»';
+        row.append(h('span', 'side-label', 'Ждут ответа'),
+                   h('span', 'side-value', waitingCache.ts ? count + ' →' : '…'));
+        row.addEventListener('click', () => openQueue('list', { waiting: true }));
+        body.appendChild(row);
+        refreshWaiting();
+      }
     }
     // заметка и напоминание — про конкретный тикет, на списке их не показываем
     if (queueConfig().enabled && !summary) body.appendChild(noteBlock());
+  }
+
+  let waitingBusy = false;
+
+  /** Дочитывает полный список неотвеченных в фоне и перерисовывает панель. */
+  function refreshWaiting() {
+    const conf = queueConfig();
+    if (waitingBusy || !conf.enabled) return;
+    const url = String(conf.waitingUrl || '').trim() || (onQueueListPage() ? location.href : '');
+    if (!url) return;
+    if (Date.now() - waitingCache.ts < 60000 && waitingCache.url === url) return;
+    waitingBusy = true;
+    fetchWaiting(false)
+      .then(() => { waitingBusy = false; fillSidePanel(); })
+      .catch(() => { waitingBusy = false; });
   }
 
   function startWatchingPage() {
@@ -4472,9 +4649,11 @@
       title: 'Риск покупателя',
       kind: 'json',
       system: AI_RULES + ' Верни только JSON: {"verdict":"низкий|средний|высокий","score":0-100,"reasons":["…"],"advice":"…"}.',
-      build: (context) => [
-        'ЗАДАЧА: оцени, похоже ли поведение покупателя на злоупотребление (частые тикеты и отмены при малом числе заказов).',
-        'Оценивай только по приведённым числам. Мало данных — verdict «низкий» и причина «мало данных».',
+      build: (context, extra) => [
+        'ЗАДАЧА: объясни словами готовую оценку риска. Балл уже посчитан скриптом — не пересчитывай его.',
+        'Скажи, какое слагаемое главное, чего не хватает для уверенности и что делать оператору.',
+        '',
+        'РАСЧЁТ (доли от оплаченных заказов):', extra || '(расчёта нет)',
         '',
         'ДАННЫЕ:', factsBlock(context)
       ].join('\n')
@@ -4524,6 +4703,75 @@
     }
   };
 
+  // ---------- Риск покупателя: считает код, не модель ----------
+
+  /**
+   * Слагаемые оценки. Принцип один: всё меряется долей от ОПЛАЧЕННЫХ заказов —
+   * десять тикетов на сто заказов и десять на десять это разные покупатели.
+   * Веса подобраны так, чтобы сумма доходила до 100 только при откровенном перекосе.
+   */
+  const RISK_PARTS = [
+    { key: 'Тикетов', labels: ['Тикетов всего', 'Тикетов в списке'], weight: 80, max: 40,
+      note: 'обращений на один оплаченный заказ' },
+    { key: 'Ненаходов', labels: ['Ненаходов'], weight: 50, max: 25, note: 'ненаходов на заказ' },
+    { key: 'Замен', labels: ['Замен'], weight: 45, max: 15, note: 'замен на заказ' },
+    { key: 'Купонов', labels: ['Купонов'], weight: 30, max: 10, note: 'активированных купонов на заказ' },
+    { key: 'Проблемных фасовок', labels: ['Тикетов по проблемным фасовкам'], weight: 20, max: 10,
+      note: 'тикетов по проблемным фасовкам на заказ' }
+  ];
+
+  const RISK_BASE = ['Оплаченных заказов', 'Заказов в списке', 'Заказов всего'];
+  const SMALL_BASE = 5;                                   // меньше — статистики нет, потолок ниже
+  const SMALL_CAP = 45;
+
+  function factNumber(facts, labels) {
+    for (let i = 0; i < labels.length; i++) {
+      const found = facts.filter((fact) => fact.label === labels[i])[0];
+      if (found && /\d/.test(String(found.value))) return { label: labels[i], value: parseNumber(found.value) };
+    }
+    return null;
+  }
+
+  /**
+   * Оценка риска по числам панели. Ничего не выдумывает: каждое слагаемое видно
+   * вместе с формулой, а при малой базе оценка честно упирается в потолок.
+   */
+  function riskScore(facts) {
+    const base = factNumber(facts, RISK_BASE);
+    if (!base || !base.value) {
+      return { score: 0, level: 'нет данных', base: base, parts: [], capped: false,
+               why: 'Не нашлось числа оплаченных заказов — считать долю не от чего.' };
+    }
+
+    const parts = [];
+    let total = 0;
+    RISK_PARTS.forEach((part) => {
+      const found = factNumber(facts, part.labels);
+      if (!found) return;
+      const ratio = found.value / base.value;
+      const points = Math.min(part.max, Math.round(ratio * part.weight));
+      total += points;
+      parts.push({ key: part.key, from: found.label, count: found.value, ratio: ratio,
+                   points: points, max: part.max, note: part.note });
+    });
+
+    const capped = base.value < SMALL_BASE && total > SMALL_CAP;
+    const score = Math.max(0, Math.min(100, capped ? SMALL_CAP : total));
+    const level = score >= 60 ? 'высокий' : (score >= 30 ? 'средний' : 'низкий');
+    return {
+      score: score, level: level, base: base, parts: parts, capped: capped,
+      why: base.value < SMALL_BASE
+        ? 'Оплаченных заказов меньше ' + SMALL_BASE + ' — выводы ненадёжны, оценка выше ' + SMALL_CAP + ' не поднимается.'
+        : ''
+    };
+  }
+
+  /** Строки с расчётом — их же показываем модели, чтобы она не пересчитывала. */
+  function riskLines(risk) {
+    return risk.parts.map((part) => '- ' + part.key + ': ' + part.count + ' ÷ ' + risk.base.value + ' = ' +
+      Math.round(part.ratio * 100) + '% → ' + part.points + ' из ' + part.max + ' баллов');
+  }
+
   // ---------- Запуск и показ результата ----------
 
   let aiBusy = false;
@@ -4531,6 +4779,7 @@
   async function runAiTask(taskId, extra) {
     const task = AI_TASKS[taskId];
     if (!task || aiBusy) return;
+    if (taskId === 'risk' && !extra) { showRiskWindow(); return; }   // это арифметика, а не рассуждение
     if (taskId === 'proof' && !aiDraftText()) {
       toast('Сначала напишите черновик в поле ответа');
       return;
@@ -4568,9 +4817,10 @@
     }
     const context = aiContext();
 
-    // Типовые случаи закрываются правилом — без запроса к модели
+    // Правило только подсказывает: покупатель мог уже ответить на вопрос шага,
+    // и увидеть это можно лишь в переписке. Решает модель — если ей не запретили.
     const byRule = matchPlaybookRule(steps, context.chat);
-    if (byRule) {
+    if (byRule && conf.ruleFirst) {
       const logId = logDecision({ step: byRule.id, source: 'rule', offer: String(byRule.text || '').slice(0, 400) });
       await offerStep(byRule, {
         logId: logId,
@@ -4584,13 +4834,23 @@
 
     const list = steps.map((step) => '- ' + step.id + ' (' + step.title + ')' +
       (step.when ? ': ' + step.when : '')).join('\n');
+    const hint = byRule
+      ? 'ПОДСКАЗКА ПРАВИЛА: слова «' + byRule.rule + '» в переписке обычно означают шаг ' + byRule.id +
+        '. Это только подсказка — проверь по переписке и выбери другой шаг, если этот уже пройден.'
+      : '';
     const prompt = [
       'ЗАДАЧА: выбери следующий шаг разбирательства и напиши текст сообщения покупателю.',
       'Выбирать можно ТОЛЬКО из списка шагов ниже, поле step — это id из списка.',
       'Текст шага меняй минимально: он согласован с оператором.',
+      'ГЛАВНОЕ: сначала прочитай всю переписку целиком, включая ответы покупателя на анкету.',
+      'Не задавай вопрос, ответ на который в переписке уже есть: если покупатель описал состояние места,',
+      'время поиска, приложил фото или ответил на анкету — этот шаг считается пройденным, бери следующий.',
+      'В поле why назови строку переписки, из-за которой выбран шаг.',
       'Формат ответа: {"step":"id","why":"почему именно этот шаг","reply":"текст покупателю","wait":"чего ждём дальше"}',
       '',
       'ШАГИ:', list,
+      '',
+      hint,
       '',
       correctionsBlock(),
       '',
@@ -4618,10 +4878,15 @@
         logDecision({ step: data && data.step || '?', source: 'model', invalid: true });
         return;
       }
-      const logId = logDecision({ step: step.id, source: 'model', offer: String(data.reply || step.text).slice(0, 400) });
+      const logId = logDecision({ step: step.id, source: 'model', rule: byRule ? byRule.id : '',
+                                  offer: String(data.reply || step.text).slice(0, 400) });
       await offerStep(step, {
         logId: logId,
-        source: 'выбрала модель',
+        source: byRule
+          ? (byRule.id === step.id
+             ? 'модель прочитала переписку и подтвердила правило «' + byRule.rule + '»'
+             : 'модель прочитала переписку и не согласилась с правилом «' + byRule.rule + '»')
+          : 'выбрала модель, прочитав переписку',
         why: String(data.why || step.when || ''),
         wait: String(data.wait || step.wait || ''),
         text: String(data.reply || step.text),
@@ -4751,6 +5016,91 @@
     const close = h('button', null, 'Закрыть');
     close.addEventListener('click', closeOverlay);
     foot.append(h('span', 'spacer'), close);
+  }
+
+  /** Окно риска: сначала расчёт по числам панели, и только по кнопке — слово модели. */
+  function showRiskWindow() {
+    const facts = aiFacts();
+    const risk = riskScore(facts);
+    const overlay = createOverlay();
+    const panel = h('div', 'panel');
+    overlay.appendChild(panel);
+
+    const head = h('div', 'head');
+    head.append(h('h2', null, '⚖ Риск покупателя'), h('span', 'spacer'));
+    panel.appendChild(head);
+
+    const body = h('div', 'body');
+    panel.appendChild(body);
+    const foot = h('div', 'foot');
+    panel.appendChild(foot);
+
+    const title = h('div');
+    title.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:8px';
+    title.textContent = 'Риск: ' + risk.level + (risk.base ? ' · ' + risk.score + '/100' : '');
+    title.style.color = risk.score >= 60 ? '#b3261e' : (risk.score >= 30 ? '#8a6d00' : '#1b7a3d');
+    body.appendChild(title);
+
+    const hint = h('p', 'hint');
+    hint.style.marginTop = '0';
+    hint.innerHTML = 'Считает скрипт, а не модель. Принцип один: всё меряется <b>долей от оплаченных ' +
+      'заказов</b> — десять тикетов на сто заказов и десять на десять это разные покупатели. ' +
+      'Каждое слагаемое ограничено своим потолком, сумма — 100.';
+    body.appendChild(hint);
+
+    if (!risk.parts.length) {
+      body.appendChild(h('div', 'side-empty', risk.why ||
+        'Панель не собрала чисел для оценки — проверьте строки «Оплаченных заказов» и «Тикетов всего».'));
+    } else {
+      const table = h('table', 'grid');
+      const header = h('tr');
+      [['Что считаем', 'Строка панели'], ['Сколько', 'Значение'], ['Доля от заказов', 'Значение ÷ оплаченные заказы'],
+       ['Баллы', 'Вклад в оценку и его потолок']].forEach((pair) => {
+        const cell = h('th', null, pair[0]);
+        cell.title = pair[1];
+        header.appendChild(cell);
+      });
+      table.appendChild(header);
+      risk.parts.forEach((part) => {
+        const tr = h('tr');
+        tr.title = part.note;
+        tr.appendChild(h('td', null, part.key));
+        tr.appendChild(h('td', null, part.count + ' из ' + risk.base.value));
+        tr.appendChild(h('td', null, Math.round(part.ratio * 100) + '%'));
+        const points = h('td', null, part.points + ' из ' + part.max);
+        if (part.points >= part.max) points.className = 'bad-cell';
+        tr.appendChild(points);
+        table.appendChild(tr);
+      });
+      const wrap = h('div', 'table-holder');
+      wrap.appendChild(table);
+      body.appendChild(wrap);
+    }
+
+    if (risk.why) {
+      const note = h('p', 'hint');
+      note.textContent = risk.why + (risk.capped ? ' Здесь потолок уже сработал.' : '');
+      body.appendChild(note);
+    }
+    if (risk.base) {
+      const from = h('p', 'hint');
+      from.textContent = 'База: «' + risk.base.label + '» = ' + risk.base.value + '. ' +
+        'Неоплаченные заказы в знаменатель не идут.';
+      body.appendChild(from);
+    }
+
+    const ask = h('button', null, 'Спросить модель');
+    ask.title = 'Модель прокомментирует расчёт словами. Числа ей передаются готовыми';
+    ask.addEventListener('click', () => runAiTask('risk', riskLines(risk).join('\n') ||
+      'Слагаемых нет: панель не собрала чисел.'));
+    const copy = h('button', null, 'Скопировать');
+    copy.addEventListener('click', () => {
+      const text = 'Риск: ' + risk.level + ' · ' + risk.score + '/100\n' + riskLines(risk).join('\n');
+      try { navigator.clipboard.writeText(text); toast('Скопировано'); } catch (e) {}
+    });
+    const close = h('button', null, 'Закрыть');
+    close.addEventListener('click', closeOverlay);
+    foot.append(copy, ask, h('span', 'spacer'), close);
   }
 
   function showAiWindow(task, result) {
@@ -5083,6 +5433,73 @@
       out[key] = found;
     });
     return { conf: out, missing: missing, fixed: fixed };
+  }
+
+  /**
+   * Обходит список страницами, пока есть «дальше». Один код на все списки:
+   * очередь, заказы и отфильтрованный список неотвеченных.
+   */
+  async function fetchList(url, conf, maxPages, prefix) {
+    const name = prefix || 'Список';
+    const first = expandUrl(url || '', location.href);
+    if (!first) return { rows: [], columns: [], error: name + ' не настроен', pages: 0, more: false };
+    try {
+      if (new URL(first).origin !== location.origin) {
+        return { rows: [], columns: [], error: name + ' на другом сайте — не открыть', pages: 0, more: false };
+      }
+    } catch (e) { return { rows: [], columns: [], error: name + ': адрес не разобран', pages: 0, more: false }; }
+
+    const limit = Math.max(1, Math.min(40, Math.round(Number(maxPages) || 1)));
+    const rows = [];
+    let columns = [];
+    let next = first;
+    let error = '';
+    let pages = 0;
+
+    while (next && pages < limit) {
+      let doc = null;
+      try {
+        const response = await fetch(next, { credentials: 'include' });
+        if (!response.ok) { error = name + ' не открылся: HTTP ' + response.status; break; }
+        doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+        doc.arhUrl = next;
+      } catch (e) {
+        error = name + ' не открылся: ' + (e && e.message || e);
+        break;
+      }
+      const parsed = readQueueTable(doc, conf);
+      if (!parsed) { if (!rows.length) error = 'На странице списка не нашлась таблица'; break; }
+      if (!columns.length) columns = parsed.columns;
+      parsed.rows.forEach((row) => {
+        if (!rows.some((existing) => existing.key === row.key)) rows.push(row);
+      });
+      pages += 1;
+      const found = findNextPage(doc);
+      next = found && new URL(found).origin === location.origin ? found : '';
+    }
+
+    return { rows: rows, columns: columns, error: error, pages: pages, more: !!next };
+  }
+
+  let waitingCache = { ts: 0, rows: [], columns: [], error: '', pages: 0, more: false, url: '' };
+
+  /**
+   * Полный список тикетов, где ждут ответа: обходит все страницы отфильтрованного
+   * списка, а не одну открытую. Адрес — из настроек, иначе текущая страница списка
+   * (в том числе с фильтром, который вы поставили на сайте).
+   */
+  async function fetchWaiting(force) {
+    const conf = queueConfig();
+    const url = String(conf.waitingUrl || '').trim() || (onQueueListPage() ? location.href : '');
+    const fresh = Date.now() - waitingCache.ts < 60000 && waitingCache.url === url;
+    if (!force && fresh) return waitingCache;
+    if (!url) {
+      waitingCache = { ts: Date.now(), rows: [], columns: [], error: '', pages: 0, more: false, url: '' };
+      return waitingCache;
+    }
+    const data = await fetchList(url, conf, conf.waitingPages, 'Список неотвеченных');
+    waitingCache = Object.assign({ ts: Date.now(), url: url }, data);
+    return waitingCache;
   }
 
   /** Читает список тикетов, обходя страницы. Возвращает {rows, columns, error}. */
