@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      2.3.0
+// @version      2.4.0
 // @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам и помощник на модели.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -198,6 +198,14 @@
     packColumn: 'Фасовка'
   };
 
+  // Обучение на закрытых тикетах: что считать закрытым и где искать ответ оператора
+  const DEFAULT_LEARN = {
+    statusValue: 'Закрыт',
+    operatorSelector: '',
+    limit: 40,
+    pauseMs: 400
+  };
+
   const DEFAULT_CONFIG = {
     text: DEFAULT_TEXT,
     pickerHotkey: 'Ctrl+Alt+Space',    // палитра со списком всех автоответов
@@ -211,7 +219,8 @@
     queue: DEFAULT_QUEUE,              // очередь тикетов и статистика по курьерам
     coupon: DEFAULT_COUPON,            // калькулятор компенсации
     rules: DEFAULT_RULES,              // правила «что пора сделать»
-    orders: DEFAULT_ORDERS             // список заказов для знаменателя статистики
+    orders: DEFAULT_ORDERS,            // список заказов для знаменателя статистики
+    learn: DEFAULT_LEARN               // обучение на закрытых тикетах
   };
 
   // ========================== 2. ХРАНИЛИЩЕ ==========================
@@ -1244,6 +1253,7 @@
     const coupon = Object.assign({}, DEFAULT_COUPON, config.coupon || {});
     const misc = { rules: config.rules == null ? DEFAULT_RULES : config.rules };
     const orders = Object.assign({}, DEFAULT_ORDERS, config.orders || {});
+    const learn = Object.assign({}, DEFAULT_LEARN, config.learn || {});
     if (!Array.isArray(side.fields)) side.fields = [];
     const opts = {
       pickerHotkey: config.pickerHotkey,
@@ -1973,6 +1983,50 @@
       orderCheckLine.append(orderCheck, orderResult);
       body.appendChild(orderCheckLine);
 
+      const learnHint = h('p', 'hint');
+      learnHint.style.margin = '18px 0 0';
+      learnHint.innerHTML = '<b>Обучение на закрытых.</b> Что считать закрытым тикетом и где на его странице ' +
+        'искать ответ оператора. Без селектора скрипт возьмёт последнее сообщение переписки — такие ответы ' +
+        'попадут в кандидаты, только если повторятся.';
+      body.appendChild(learnHint);
+
+      const learnText = (label, key, placeholder, cls) => {
+        const wrap = h('label', null, label);
+        wrap.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:10px;';
+        const input = h('input', cls || null);
+        input.type = 'text';
+        input.value = learn[key] == null ? '' : String(learn[key]);
+        input.placeholder = placeholder || '';
+        input.style.marginTop = '4px';
+        input.addEventListener('input', () => { learn[key] = input.value.trim(); });
+        wrap.appendChild(input);
+        return wrap;
+      };
+
+      const learnGrid = h('div', 'row');
+      learnGrid.append(learnText('Статус закрытого тикета', 'statusValue', 'Закрыт'),
+                       learnText('Сколько читать за прогон', 'limit', '40', 'num'));
+      body.appendChild(learnGrid);
+
+      const operatorLabel = h('label', null, 'Сообщения оператора на странице тикета');
+      operatorLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:10px;';
+      const operatorLine = h('div', 'line');
+      const operatorInput = h('input');
+      operatorInput.type = 'text';
+      operatorInput.value = learn.operatorSelector || '';
+      operatorInput.placeholder = '.msg.out';
+      operatorInput.addEventListener('input', () => { learn.operatorSelector = operatorInput.value.trim(); });
+      const operatorPick = h('button', null, 'Указать');
+      operatorPick.title = 'Откройте тикет и кликните своё сообщение';
+      operatorPick.addEventListener('click', () => pickElement((path, el) => {
+        if (!el) return;
+        learn.operatorSelector = shortSelector(el);
+        operatorInput.value = learn.operatorSelector;
+      }));
+      operatorLine.append(operatorInput, operatorPick);
+      operatorLabel.appendChild(operatorLine);
+      body.appendChild(operatorLabel);
+
       const rulesLabel = h('label', null, 'Правила «к закрытию»: что подсвечивать в очереди');
       rulesLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:14px;';
       const rulesArea = h('textarea', 'small');
@@ -2349,7 +2403,8 @@
         queue: queue,
         coupon: coupon,
         rules: misc.rules,
-        orders: orders
+        orders: orders,
+        learn: learn
       });
       hotkeyCache.clear();
       reloadTemplates();
@@ -4618,6 +4673,123 @@
     return options;
   }
 
+  // ---------- Обучение на закрытых тикетах ----------
+
+  function learnConfig() {
+    return Object.assign({}, DEFAULT_LEARN, config.learn || {});
+  }
+
+  /** Текст последнего ответа оператора со страницы тикета. */
+  function operatorReply(doc, conf) {
+    const selector = String(conf.operatorSelector || '').trim();
+    let nodes = [];
+    if (selector) {
+      try { nodes = Array.prototype.slice.call(doc.querySelectorAll(selector)); } catch (e) { nodes = []; }
+    }
+    let sure = !!nodes.length;
+    if (!nodes.length) {
+      const fallback = String(aiConfig().chatSelector || '').trim();
+      if (fallback) {
+        try { nodes = Array.prototype.slice.call(doc.querySelectorAll(fallback)); } catch (e) { nodes = []; }
+      }
+    }
+    if (!nodes.length) return { text: '', sure: false };
+    const text = String(nodes[nodes.length - 1].textContent || '').replace(/\s+/g, ' ').trim();
+    return { text: text.slice(0, 700), sure: sure };
+  }
+
+  /** Ключ похожести: без чисел, имён-заглушек и лишних пробелов. */
+  function replyKey(text) {
+    return normalizeText(text)
+      .replace(/[0-9]+/g, '#')
+      .replace(/[«»"'(),.!?:;—–-]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 160);
+  }
+
+  function shortTitle(text) {
+    const words = String(text || '').replace(/\s+/g, ' ').trim().split(' ').slice(0, 5).join(' ');
+    return words.length > 48 ? words.slice(0, 48) + '…' : words;
+  }
+
+  /**
+   * Читает закрытые тикеты из списка и собирает, чем оператор их закрывал.
+   * Ничего не сохраняет: возвращает разбор, дальше решает человек.
+   */
+  async function learnFromClosed(rows, conf, onProgress, shouldStop) {
+    const learn = learnConfig();
+    const queue = queueConfig();
+    const closedValue = normalizeText(learn.statusValue);
+    const limit = Math.max(1, Math.min(200, Math.round(Number(learn.limit) || 40)));
+    const pause = Math.max(0, Math.min(3000, Math.round(Number(learn.pauseMs) || 400)));
+
+    const closed = rows.filter((row) => {
+      if (!row.href) return false;
+      if (!closedValue) return true;
+      return normalizeText(row.values[queue.statusColumn] || '').indexOf(closedValue) !== -1;
+    }).slice(0, limit);
+
+    const groups = new Map();
+    const examples = [];
+    let read = 0;
+    let skipped = 0;
+
+    for (let i = 0; i < closed.length; i++) {
+      if (shouldStop && shouldStop()) break;
+      const row = closed[i];
+      if (onProgress) onProgress({ done: i, total: closed.length, ticket: row.values[Object.keys(row.values)[0]] || '' });
+      let doc = null;
+      try {
+        const response = await fetch(row.href, { credentials: 'include' });
+        if (!response.ok) { skipped += 1; continue; }
+        doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+        doc.arhUrl = row.href;
+      } catch (e) { skipped += 1; continue; }
+
+      read += 1;
+      const reply = operatorReply(doc, learn);
+      if (!reply.text || reply.text.length < 20) { skipped += 1; continue; }
+
+      const key = replyKey(reply.text);
+      if (!groups.has(key)) groups.set(key, { key: key, text: reply.text, count: 0, sure: reply.sure, samples: [] });
+      const group = groups.get(key);
+      group.count += 1;
+      if (reply.text.length > group.text.length) group.text = reply.text;   // берём самый полный вариант
+
+      const type = row.values[queue.typeColumn] || '';
+      const pack = row.values[queue.packColumn] || '';
+      const example = {
+        type: String(type).slice(0, 120),
+        pack: String(pack).slice(0, 80),
+        keywords: normalizeText(type + ' ' + pack).split(/[^а-яёa-z0-9]+/i).filter((word) => word.length > 3).slice(0, 5),
+        weight: 1,
+        ts: Date.now(),
+        groupKey: key
+      };
+      group.samples.push(example);
+      examples.push(example);
+      if (pause) await aiSleepMs(pause);                  // не долбим сайт очередью запросов
+    }
+
+    const once = Array.from(groups.values()).filter((group) => group.count < 2).length;
+    const candidates = Array.from(groups.values())
+      .filter((group) => group.count >= 2)                // шаг из единичного ответа — это шум, а не правило
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 20)
+      .map((group, index) => Object.assign(group, {
+        id: 'learned_' + (index + 1),
+        title: shortTitle(group.text)
+      }));
+
+    return { read: read, skipped: skipped, closed: closed.length, once: once,
+             candidates: candidates, examples: examples };
+  }
+
+  function aiSleepMs(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   // ---------- Карточка курьера ----------
 
   let queuePeriod = 7;                                    // общий период для статистики курьеров
@@ -4764,7 +4936,8 @@
     const tabCouriers = h('button', 'tab', 'Курьеры');
     const tabRules = h('button', 'tab', 'К закрытию');
     const tabAccuracy = h('button', 'tab', 'Точность');
-    tabs.append(tabList, tabCouriers, tabRules, tabAccuracy);
+    const tabLearn = h('button', 'tab', 'Обучение');
+    tabs.append(tabList, tabCouriers, tabRules, tabAccuracy, tabLearn);
     const refresh = h('button', 'icon', '⟳');
     refresh.title = 'Перечитать список';
     head.append(tabs, refresh);
@@ -4780,7 +4953,7 @@
     foot.append(count, h('span', 'spacer'), close);
     panel.appendChild(foot);
 
-    let active = ['couriers', 'rules', 'accuracy'].indexOf(initialTab) !== -1 ? initialTab : 'list';
+    let active = ['couriers', 'rules', 'accuracy', 'learn'].indexOf(initialTab) !== -1 ? initialTab : 'list';
     let data = { rows: [], columns: [], error: '' };
     let orders = { rows: [], columns: [], error: '' };
     const filters = { text: '', type: '', status: '', courier: '', onlyNotes: false };
@@ -5131,15 +5304,173 @@
       draw();
     }
 
+    function renderLearn() {
+      const learn = learnConfig();
+      const hint = h('p', 'hint');
+      hint.innerHTML = 'Скрипт прочитает закрытые тикеты из списка и посмотрит, чем вы их закрывали. ' +
+        'Повторяющиеся ответы он предложит как шаги сценария — вы отмечаете нужные и даёте им названия. ' +
+        'Ничего не сохраняется, пока вы не нажмёте «Добавить выбранные».';
+      body.appendChild(hint);
+
+      const line = h('div', 'line');
+      const start = h('button', 'primary', 'Прочитать закрытые');
+      const stop = h('button', null, 'Остановить');
+      stop.disabled = true;
+      const progress = h('span', 'pval');
+      progress.textContent = 'Закрытыми считаются тикеты со статусом «' + (learn.statusValue || 'любой') +
+        '», максимум ' + learn.limit + ' за прогон.';
+      line.append(start, stop, progress);
+      body.appendChild(line);
+
+      const holder = h('div', 'table-holder');
+      body.appendChild(holder);
+
+      const footLine = h('div', 'line');
+      footLine.style.marginTop = '10px';
+      const apply = h('button', 'primary', 'Добавить выбранные в сценарий');
+      apply.disabled = true;
+      const applyInfo = h('span', 'pval');
+      footLine.append(apply, applyInfo);
+      body.appendChild(footLine);
+
+      let stopped = false;
+      let result = null;
+      const chosen = new Set();
+
+      const drawResult = () => {
+        holder.textContent = '';
+        if (!result) return;
+        count.textContent = 'Прочитано: ' + result.read + ' из ' + result.closed +
+          (result.skipped ? ' · пропущено: ' + result.skipped : '') +
+          (result.once ? ' · единичных ответов: ' + result.once : '');
+        if (!result.candidates.length) {
+          holder.appendChild(h('div', 'side-empty',
+            'Повторяющихся ответов не нашлось. Проверьте селектор сообщений оператора в настройках.'));
+          return;
+        }
+
+        const table = h('table', 'grid');
+        const header = h('tr');
+        [['', 'Отметьте, что добавить'], ['Повторов', 'Сколько раз встретился такой ответ'],
+         ['Название шага', 'Как он будет называться в сценарии'],
+         ['Текст ответа', 'Дословно как отвечали вы']].forEach((pair) => {
+          const cell = h('th', null, pair[0]);
+          cell.title = pair[1];
+          header.appendChild(cell);
+        });
+        table.appendChild(header);
+
+        result.candidates.forEach((candidate) => {
+          const tr = h('tr');
+          const boxCell = h('td');
+          const box = h('input');
+          box.type = 'checkbox';
+          box.checked = chosen.has(candidate.id);
+          box.addEventListener('change', () => {
+            if (box.checked) chosen.add(candidate.id); else chosen.delete(candidate.id);
+            apply.disabled = !chosen.size;
+            applyInfo.textContent = chosen.size ? 'Выбрано: ' + chosen.size : '';
+          });
+          boxCell.appendChild(box);
+          tr.appendChild(boxCell);
+
+          tr.appendChild(h('td', null, String(candidate.count)));
+
+          const titleCell = h('td');
+          const titleInput = h('input');
+          titleInput.type = 'text';
+          titleInput.value = candidate.title;
+          titleInput.addEventListener('input', () => { candidate.title = titleInput.value; });
+          titleCell.appendChild(titleInput);
+          tr.appendChild(titleCell);
+
+          const textCell = h('td', null, candidate.text.slice(0, 160) + (candidate.text.length > 160 ? '…' : ''));
+          textCell.title = candidate.text;
+          tr.appendChild(textCell);
+          table.appendChild(tr);
+        });
+        holder.appendChild(table);
+      };
+
+      start.addEventListener('click', async () => {
+        stopped = false;
+        start.disabled = true;
+        stop.disabled = false;
+        apply.disabled = true;
+        chosen.clear();
+        holder.textContent = '';
+        try {
+          result = await learnFromClosed(
+            data.rows,
+            conf,
+            (state) => { progress.textContent = 'Читаю ' + (state.done + 1) + ' из ' + state.total + ': ' + state.ticket; },
+            () => stopped
+          );
+          progress.textContent = stopped ? 'Остановлено' : 'Готово';
+          drawResult();
+        } catch (error) {
+          progress.textContent = 'Не получилось: ' + (error && error.message || error);
+        } finally {
+          start.disabled = false;
+          stop.disabled = true;
+        }
+      });
+
+      stop.addEventListener('click', () => { stopped = true; stop.disabled = true; });
+
+      apply.addEventListener('click', () => {
+        if (!result || !chosen.size) return;
+        const picked = result.candidates.filter((candidate) => chosen.has(candidate.id));
+        const steps = picked.map((candidate) => ({
+          id: candidate.id,
+          title: candidate.title || candidate.id,
+          rule: '',
+          when: 'собрано из закрытых тикетов, повторов: ' + candidate.count,
+          wait: '',
+          text: candidate.text
+        }));
+
+        const ai = Object.assign({}, DEFAULT_AI, config.ai || {});
+        ai.playbook = String(ai.playbook || '').trim() + '\n\n' + stepsToPlaybook(steps);
+        config = Object.assign({}, config, { ai: ai });
+        saveConfig(config);
+
+        const memory = loadMemory();
+        picked.forEach((candidate) => {
+          candidate.samples.forEach((sample) => {
+            memory.examples.push({
+              action: candidate.id,
+              type: sample.type,
+              phase: '',
+              keywords: sample.keywords,
+              weight: 1,
+              ts: sample.ts,
+              comment: ''
+            });
+          });
+        });
+        saveMemory(memory);
+
+        applyInfo.textContent = 'Добавлено шагов: ' + steps.length +
+          ' · примеров: ' + picked.reduce((sum, candidate) => sum + candidate.samples.length, 0);
+        apply.disabled = true;
+        chosen.clear();
+        drawResult();
+        toast('Сценарий пополнен');
+      });
+    }
+
     function render() {
       body.textContent = '';
       tabList.setAttribute('aria-selected', String(active === 'list'));
       tabCouriers.setAttribute('aria-selected', String(active === 'couriers'));
       tabRules.setAttribute('aria-selected', String(active === 'rules'));
       tabAccuracy.setAttribute('aria-selected', String(active === 'accuracy'));
+      tabLearn.setAttribute('aria-selected', String(active === 'learn'));
       if (active === 'list') renderList();
       else if (active === 'couriers') renderCouriers();
       else if (active === 'rules') renderRules();
+      else if (active === 'learn') renderLearn();
       else renderAccuracy();
     }
 
@@ -5147,6 +5478,7 @@
     tabCouriers.addEventListener('click', () => { active = 'couriers'; render(); });
     tabRules.addEventListener('click', () => { active = 'rules'; render(); });
     tabAccuracy.addEventListener('click', () => { active = 'accuracy'; render(); });
+    tabLearn.addEventListener('click', () => { active = 'learn'; render(); });
     refresh.addEventListener('click', () => load(true));
 
     await load(false);
