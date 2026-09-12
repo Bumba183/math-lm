@@ -2,8 +2,8 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      1.9.0
-// @description  Автоответы по триггеру или горячим клавишам, боковая панель со сведениями о заказе и статистикой покупателя, плюс помощник на модели: черновик ответа, вердикт по сроку, риск покупателя, разбор данных, резюме и вычитка.
+// @version      2.0.0
+// @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам и помощник на модели.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
 // @license      MIT
@@ -25,6 +25,8 @@
 
   const STORE_KEY = 'arh.config.v1';
   const LOG_KEY = 'arh.log.v1';
+  const NOTES_KEY = 'arh.notes.v1';
+  const SEEN_KEY = 'arh.seen.v1';
   const CURSOR = '{cursor}';           // маркер: куда поставить курсор после вставки
 
   // Автоответы «из коробки». Их можно полностью заменить в настройках
@@ -149,15 +151,32 @@
     ].join('\n')
   };
 
+  // Очередь тикетов: откуда брать список и какие колонки что означают
+  const DEFAULT_QUEUE = {
+    enabled: true,
+    url: '~/ticket/list/',
+    table: '*',
+    pages: 3,
+    dateColumn: 'Дата',
+    typeColumn: 'Тип',
+    statusColumn: 'Статус',
+    courierColumn: 'Курьер',
+    packColumn: 'Фасовка',
+    refreshMin: 5,
+    notify: false
+  };
+
   const DEFAULT_CONFIG = {
     text: DEFAULT_TEXT,
     pickerHotkey: 'Ctrl+Alt+Space',    // палитра со списком всех автоответов
     settingsHotkey: 'Ctrl+Alt+0',      // окно настроек
+    queueHotkey: 'Ctrl+Alt+Q',         // очередь тикетов
     toasts: true,                      // всплывающие подсказки
     fab: true,                         // круглая кнопка на странице
     fabPos: null,                      // её положение, если пользователь перетащил
     panel: DEFAULT_PANEL,              // панель со сведениями о заказе
-    ai: DEFAULT_AI                     // помощник на базе модели
+    ai: DEFAULT_AI,                    // помощник на базе модели
+    queue: DEFAULT_QUEUE               // очередь тикетов и статистика по курьерам
   };
 
   // ========================== 2. ХРАНИЛИЩЕ ==========================
@@ -763,6 +782,12 @@
       openPicker();
       return;
     }
+    if (matches(config.queueHotkey, sigs)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      openQueue();
+      return;
+    }
 
     const item = templates.find((t) => t.hk && sigs.indexOf(t.hk.sig) !== -1);
     if (!item) return;
@@ -966,6 +991,15 @@
     'input.num { width: 78px; flex: 0 0 auto; }',
     '.pval { font-size: 12px; color: #5b6273; }',
     '.pnow { flex: 1 1 100%; }',
+    '.table-holder { overflow: auto; max-height: 56vh; margin-top: 10px; }',
+    'table.grid { border-collapse: collapse; width: 100%; font-size: 12px; }',
+    'table.grid th { position: sticky; top: 0; text-align: left; padding: 7px 9px; background: #eef0f5;',
+    '  cursor: default; white-space: nowrap; }',
+    'table.grid td { padding: 6px 9px; border-top: 1px solid #eceef2; vertical-align: top; }',
+    'table.grid tr:hover td { background: #f2f4f9; }',
+    'table.grid .bad-cell { color: #b3261e; font-weight: 600; }',
+    '.note-box { border-top: 1px solid #e6e8ee; margin-top: 8px; padding-top: 8px; }',
+    '.note-box textarea { min-height: 56px; font-size: 12px; }',
     '@media (prefers-color-scheme: dark) {',
     '  .side { background: #1e222b; color: #e7e9ee; border-color: #313745; }',
     '  .side-head, .ai-row { border-color: #313745; }',
@@ -977,6 +1011,10 @@
     '  .pfield { border-color: #313745; }',
     '  select { background: #2a3040; border-color: #3c4354; }',
     '  .pval { color: #a3abbd; }',
+    '  table.grid th { background: #2a3040; }',
+    '  table.grid td { border-color: #313745; }',
+    '  table.grid tr:hover td { background: #262c38; }',
+    '  .note-box { border-color: #313745; }',
     '  .overlay { color: #e7e9ee; }',
     '  .panel { background: #1e222b; }',
     '  .head, .foot { border-color: #313745; }',
@@ -1167,6 +1205,7 @@
     }));
     const side = JSON.parse(JSON.stringify(Object.assign({}, DEFAULT_PANEL, config.panel || {})));
     const ai = Object.assign({}, DEFAULT_AI, config.ai || {});
+    const queue = Object.assign({}, DEFAULT_QUEUE, config.queue || {});
     if (!Array.isArray(side.fields)) side.fields = [];
     const opts = {
       pickerHotkey: config.pickerHotkey,
@@ -1180,9 +1219,10 @@
     const tabList = h('button', 'tab', 'Автоответы');
     const tabText = h('button', 'tab', 'Текстом');
     const tabPanel = h('button', 'tab', 'Панель');
+    const tabQueue = h('button', 'tab', 'Очередь');
     const tabAi = h('button', 'tab', 'ИИ');
     const tabOpts = h('button', 'tab', 'Настройки');
-    tabs.append(tabList, tabText, tabPanel, tabAi, tabOpts);
+    tabs.append(tabList, tabText, tabPanel, tabQueue, tabAi, tabOpts);
     head.append(tabs);
     panel.appendChild(head);
 
@@ -1749,6 +1789,94 @@
       body.appendChild(add);
     }
 
+    function renderQueueTab() {
+      cards = [];
+      const hint = h('p', 'hint');
+      hint.innerHTML = 'Очередь читает ту же страницу списка тикетов, что открываете вы, и обходит её страницы. ' +
+        'Названия колонок нужны для фильтров и статистики по курьерам — впишите их так, как они называются на сайте.';
+      body.appendChild(hint);
+
+      const onLabel = h('label', 'check');
+      onLabel.style.marginTop = '0';
+      const onBox = h('input');
+      onBox.type = 'checkbox';
+      onBox.checked = !!queue.enabled;
+      onBox.addEventListener('change', () => { queue.enabled = onBox.checked; });
+      onLabel.append(onBox, document.createTextNode('Включить очередь, заметки и фоновые проверки'));
+      body.appendChild(onLabel);
+
+      const text = (label, key, placeholder, cls) => {
+        const wrap = h('label', null, label);
+        wrap.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:10px;';
+        const input = h('input', cls || null);
+        input.type = 'text';
+        input.value = queue[key] == null ? '' : String(queue[key]);
+        input.placeholder = placeholder || '';
+        input.style.marginTop = '4px';
+        input.addEventListener('input', () => { queue[key] = input.value.trim(); });
+        wrap.appendChild(input);
+        return wrap;
+      };
+
+      body.appendChild(text('Адрес списка тикетов (~/ подставит код кабинета)', 'url', '~/ticket/list/'));
+
+      const grid1 = h('div', 'row');
+      grid1.append(text('Таблица («*» — самая длинная)', 'table', '*'),
+                   text('Сколько страниц обойти', 'pages', '3', 'num'));
+      body.appendChild(grid1);
+
+      const grid2 = h('div', 'row');
+      grid2.append(text('Колонка даты', 'dateColumn', 'Дата'), text('Колонка типа', 'typeColumn', 'Тип'));
+      body.appendChild(grid2);
+
+      const grid3 = h('div', 'row');
+      grid3.append(text('Колонка статуса', 'statusColumn', 'Статус'),
+                   text('Колонка курьера', 'courierColumn', 'Курьер'));
+      body.appendChild(grid3);
+
+      const grid4 = h('div', 'row');
+      grid4.append(text('Колонка фасовки', 'packColumn', 'Фасовка'),
+                   text('Проверять новые каждые, мин', 'refreshMin', '5', 'num'));
+      body.appendChild(grid4);
+
+      const notifyLabel = h('label', 'check');
+      const notifyBox = h('input');
+      notifyBox.type = 'checkbox';
+      notifyBox.checked = !!queue.notify;
+      notifyBox.addEventListener('change', () => {
+        queue.notify = notifyBox.checked;
+        if (notifyBox.checked && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+          try { Notification.requestPermission(); } catch (e) {}
+        }
+      });
+      notifyLabel.append(notifyBox, document.createTextNode('Уведомления системы о новых тикетах и напоминаниях'));
+      body.appendChild(notifyLabel);
+
+      const checkLine = h('div', 'line');
+      checkLine.style.marginTop = '14px';
+      const check = h('button', null, 'Проверить список');
+      const result = h('span', 'pval');
+      check.addEventListener('click', async () => {
+        const saved = config.queue;
+        config.queue = Object.assign({}, queue);
+        result.textContent = 'Читаю…';
+        try {
+          const data = await fetchQueue(true);
+          result.textContent = data.error
+            ? data.error
+            : 'Строк: ' + data.rows.length + ' · колонки: ' + data.columns.join(', ');
+        } finally {
+          config.queue = saved;
+          queueCache = { ts: 0, rows: [], columns: [], error: '' };
+        }
+      });
+      checkLine.append(check, result);
+      body.appendChild(checkLine);
+
+      const notes = loadNotes();
+      count.textContent = 'Заметок сохранено: ' + Object.keys(notes).length;
+    }
+
     function renderAiTab() {
       cards = [];
       const hint = h('p', 'hint');
@@ -1950,11 +2078,13 @@
       tabList.setAttribute('aria-selected', String(active === 'list'));
       tabText.setAttribute('aria-selected', String(active === 'text'));
       tabPanel.setAttribute('aria-selected', String(active === 'panel'));
+      tabQueue.setAttribute('aria-selected', String(active === 'queue'));
       tabAi.setAttribute('aria-selected', String(active === 'ai'));
       tabOpts.setAttribute('aria-selected', String(active === 'opts'));
       if (active === 'list') renderList();
       else if (active === 'text') renderText();
       else if (active === 'panel') renderPanelTab();
+      else if (active === 'queue') renderQueueTab();
       else if (active === 'ai') renderAiTab();
       else renderOpts();
     }
@@ -1966,6 +2096,7 @@
     tabList.addEventListener('click', () => show('list'));
     tabText.addEventListener('click', () => show('text'));
     tabPanel.addEventListener('click', () => show('panel'));
+    tabQueue.addEventListener('click', () => show('queue'));
     tabAi.addEventListener('click', () => show('ai'));
     tabOpts.addEventListener('click', () => show('opts'));
 
@@ -2004,14 +2135,17 @@
         toasts: opts.toasts,
         fab: opts.fab,
         panel: side,
-        ai: ai
+        ai: ai,
+        queue: queue
       });
       hotkeyCache.clear();
       reloadTemplates();
+      queueCache = { ts: 0, rows: [], columns: [], error: '' };   // настройки списка могли поменяться
       const saved = saveConfig(config);
       closeOverlay();
       ensureFab();
       updateSidePanel();
+      startWatchers();
 
       const skipped = draft.length - templates.length;
       let message = saved ? 'Сохранено, автоответов: ' + templates.length
@@ -2621,6 +2755,9 @@ return {
     const gear = h('button', 'icon', '⚙');
     gear.title = 'Настроить поля';
     gear.addEventListener('click', () => openSettings('panel'));
+    const queueButton = h('button', 'icon', '☰');
+    queueButton.title = 'Очередь тикетов (' + (config.queueHotkey || DEFAULT_CONFIG.queueHotkey) + ')';
+    queueButton.addEventListener('click', () => openQueue());
     const fold = h('button', 'icon', '–');
     fold.title = 'Свернуть';
     fold.addEventListener('click', () => {
@@ -2629,7 +2766,7 @@ return {
       side.classList.toggle('folded', !!config.panel.collapsed);
       fold.textContent = config.panel.collapsed ? '+' : '–';
     });
-    head.append(title, h('span', 'spacer'), reload, gear, fold);
+    head.append(title, h('span', 'spacer'), queueButton, reload, gear, fold);
 
     const body = h('div', 'side-body');
     side.append(head, body);
@@ -2682,6 +2819,7 @@ return {
     });
 
     if (!shown) body.appendChild(h('div', 'side-empty', 'На этой странице данных для панели нет'));
+    if (queueConfig().enabled) body.appendChild(noteBlock());
   }
 
   function startWatchingPage() {
@@ -3624,15 +3762,524 @@ return {
     return row;
   }
 
-  // ========================== 13. СТАРТ ==========================
+  // ========================== 13. ОЧЕРЕДЬ, ЗАМЕТКИ, КУРЬЕРЫ ==========================
+
+  function queueConfig() {
+    return Object.assign({}, DEFAULT_QUEUE, config.queue || {});
+  }
+
+  /** Ключ тикета: номер из адреса, иначе сам путь. */
+  function ticketKey(href) {
+    const url = String(href || location.href);
+    const match = /\/(?:ticket|tickets|order|orders)\/([^/?#]+)/i.exec(url);
+    if (match) return match[1];
+    try { return new URL(url, location.href).pathname; } catch (e) { return url; }
+  }
+
+  // ---------- Заметки и напоминания ----------
+
+  function loadNotes() {
+    try {
+      const raw = hasGM ? GM_getValue(NOTES_KEY, null) : localStorage.getItem(NOTES_KEY);
+      const parsed = typeof raw === 'string' && raw ? JSON.parse(raw) : raw;
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (e) { return {}; }
+  }
+
+  function saveNotes(notes) {
+    try {
+      const json = JSON.stringify(notes);
+      if (hasGM) GM_setValue(NOTES_KEY, json); else localStorage.setItem(NOTES_KEY, json);
+    } catch (e) { /* переполнено хранилище — заметка не критична */ }
+  }
+
+  function getNote(key) {
+    const note = loadNotes()[key];
+    return note && typeof note === 'object' ? note : { text: '', due: 0 };
+  }
+
+  function setNote(key, patch) {
+    const notes = loadNotes();
+    const current = notes[key] && typeof notes[key] === 'object' ? notes[key] : { text: '', due: 0 };
+    const next = Object.assign({}, current, patch, { ts: Date.now() });
+    if (!String(next.text || '').trim() && !next.due) delete notes[key];
+    else notes[key] = next;
+    saveNotes(notes);
+    return next;
+  }
+
+  /** Напоминания, у которых вышел срок. */
+  function dueNotes(now) {
+    const notes = loadNotes();
+    const moment = now || Date.now();
+    return Object.keys(notes)
+      .filter((key) => notes[key] && notes[key].due && notes[key].due <= moment && !notes[key].fired)
+      .map((key) => Object.assign({ key: key }, notes[key]));
+  }
+
+  function markNoteFired(key) {
+    const notes = loadNotes();
+    if (notes[key]) {
+      notes[key].fired = true;
+      notes[key].due = 0;
+      saveNotes(notes);
+    }
+  }
+
+  // ---------- Загрузка очереди ----------
+
+  let queueCache = { ts: 0, rows: [], columns: [], error: '' };
+
+  /** Разбирает таблицу списка в строки со значениями по названиям колонок. */
+  function readQueueTable(doc, conf) {
+    const table = findTableByHeading(doc, conf.table || '*');
+    if (!table) return null;
+    const rows = Array.prototype.slice.call(table.rows || []);
+    if (!rows.length) return null;
+
+    const header = rows[0];
+    const columns = Array.prototype.slice.call(header.cells || [])
+      .map((cell) => String(cell.textContent || '').replace(/\s+/g, ' ').trim());
+    const out = [];
+    dataRows(table).forEach((row) => {
+      const cells = Array.prototype.slice.call(row.cells || []);
+      if (!cells.length) return;
+      const values = {};
+      cells.forEach((cell, index) => {
+        values[columns[index] || ('Колонка ' + (index + 1))] = String(cell.textContent || '').replace(/\s+/g, ' ').trim();
+      });
+      const link = row.querySelector('a[href]');
+      const href = link ? expandUrl(link.getAttribute('href'), docUrl(doc)) : '';
+      out.push({ values: values, href: href || '', key: ticketKey(href || JSON.stringify(values)) });
+    });
+    return { columns: columns, rows: out };
+  }
+
+  /** Читает список тикетов, обходя страницы. Возвращает {rows, columns, error}. */
+  async function fetchQueue(force) {
+    const conf = queueConfig();
+    const fresh = Date.now() - queueCache.ts < 60000;
+    if (!force && fresh && queueCache.rows.length) return queueCache;
+    if (!conf.url) {
+      queueCache = { ts: Date.now(), rows: [], columns: [], error: 'Не указан адрес списка тикетов' };
+      return queueCache;
+    }
+
+    const first = expandUrl(conf.url, location.href);
+    if (!first || new URL(first).origin !== location.origin) {
+      queueCache = { ts: Date.now(), rows: [], columns: [], error: 'Список тикетов на другом сайте — не открыть' };
+      return queueCache;
+    }
+
+    const pages = Math.max(1, Math.min(20, Math.round(Number(conf.pages) || 1)));
+    const rows = [];
+    let columns = [];
+    let url = first;
+    let error = '';
+    for (let page = 0; page < pages && url; page++) {
+      let doc = null;
+      try {
+        const response = await fetch(url, { credentials: 'include' });
+        if (!response.ok) { error = 'Список не открылся: HTTP ' + response.status; break; }
+        doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+        doc.arhUrl = url;
+      } catch (e) {
+        error = 'Список не открылся: ' + (e && e.message || e);
+        break;
+      }
+      const parsed = readQueueTable(doc, conf);
+      if (!parsed) { if (!rows.length) error = 'На странице списка не нашлась таблица'; break; }
+      if (!columns.length) columns = parsed.columns;
+      parsed.rows.forEach((row) => {
+        if (!rows.some((existing) => existing.key === row.key)) rows.push(row);
+      });
+      const next = findNextPage(doc);
+      url = next && new URL(next).origin === location.origin ? next : '';
+    }
+
+    queueCache = { ts: Date.now(), rows: rows, columns: columns, error: error };
+    return queueCache;
+  }
+
+  // ---------- Статистика по курьерам ----------
+
+  /**
+   * Сводка по курьерам. Каждое число — простая и проверяемая величина:
+   * всего строк у курьера, сколько из них по отмеченным фасовкам, и их доля.
+   */
+  function courierStats(rows, conf) {
+    const packs = (panelConfig().packs || {}).counted || [];
+    const counted = packs.map(normalizeText);
+    const courierCol = conf.courierColumn;
+    const packCol = conf.packColumn;
+    const map = new Map();
+
+    rows.forEach((row) => {
+      const courier = String(row.values[courierCol] || '').trim() || '— без курьера —';
+      if (!map.has(courier)) map.set(courier, { courier: courier, total: 0, flagged: 0, last: '' });
+      const item = map.get(courier);
+      item.total += 1;
+      const packText = normalizeText(packCol ? row.values[packCol] : '') ||
+        normalizeText(Object.keys(row.values).map((key) => row.values[key]).join(' '));
+      if (counted.length && counted.some((value) => packText.indexOf(value) !== -1)) item.flagged += 1;
+      const date = row.values[conf.dateColumn] || '';
+      if (date && (!item.last || (parseDate(date) || 0) > (parseDate(item.last) || 0))) item.last = date;
+    });
+
+    return Array.from(map.values())
+      .map((item) => Object.assign(item, { share: item.total ? item.flagged / item.total : 0 }))
+      .sort((a, b) => (b.flagged - a.flagged) || (b.total - a.total));
+  }
+
+  // ---------- Окно очереди ----------
+
+  let queueSort = { column: '', dir: 1 };
+
+  async function openQueue(initialTab) {
+    const conf = queueConfig();
+    const overlay = createOverlay();
+    const panel = h('div', 'panel');
+    panel.style.width = 'min(1000px, 100%)';
+    overlay.appendChild(panel);
+
+    const head = h('div', 'head');
+    const tabs = h('div', 'tabs');
+    const tabList = h('button', 'tab', 'Очередь');
+    const tabCouriers = h('button', 'tab', 'Курьеры');
+    tabs.append(tabList, tabCouriers);
+    const refresh = h('button', 'icon', '⟳');
+    refresh.title = 'Перечитать список';
+    head.append(tabs, refresh);
+    panel.appendChild(head);
+
+    const body = h('div', 'body');
+    panel.appendChild(body);
+    const foot = h('div', 'foot');
+    const count = h('span', 'hint');
+    count.style.margin = '0';
+    const close = h('button', null, 'Закрыть');
+    close.addEventListener('click', closeOverlay);
+    foot.append(count, h('span', 'spacer'), close);
+    panel.appendChild(foot);
+
+    let active = initialTab === 'couriers' ? 'couriers' : 'list';
+    let data = { rows: [], columns: [], error: '' };
+    const filters = { text: '', type: '', status: '', courier: '', onlyNotes: false };
+
+    const load = async (force) => {
+      body.textContent = '';
+      body.appendChild(h('div', 'side-empty', 'Читаю список тикетов…'));
+      data = await fetchQueue(force);
+      render();
+    };
+
+    const visibleRows = () => {
+      const notes = loadNotes();
+      const needle = normalizeText(filters.text);
+      return data.rows.filter((row) => {
+        if (filters.type && row.values[conf.typeColumn] !== filters.type) return false;
+        if (filters.status && row.values[conf.statusColumn] !== filters.status) return false;
+        if (filters.courier && row.values[conf.courierColumn] !== filters.courier) return false;
+        if (filters.onlyNotes && !notes[row.key]) return false;
+        if (!needle) return true;
+        return normalizeText(Object.keys(row.values).map((key) => row.values[key]).join(' ')).indexOf(needle) !== -1;
+      });
+    };
+
+    const select = (label, column, key) => {
+      const values = [];
+      data.rows.forEach((row) => {
+        const value = row.values[column];
+        if (value && values.indexOf(value) === -1) values.push(value);
+      });
+      if (!values.length) return null;
+      const node = h('select');
+      const any = h('option', null, label);
+      any.value = '';
+      node.appendChild(any);
+      values.sort().forEach((value) => {
+        const option = h('option', null, value.length > 40 ? value.slice(0, 40) + '…' : value);
+        option.value = value;
+        node.appendChild(option);
+      });
+      node.value = filters[key];
+      node.addEventListener('change', () => { filters[key] = node.value; render(); });
+      return node;
+    };
+
+    function renderList() {
+      const line = h('div', 'line');
+      const search = h('input');
+      search.type = 'text';
+      search.placeholder = 'Поиск по всем колонкам…';
+      search.value = filters.text;
+      search.addEventListener('input', () => { filters.text = search.value; renderTable(); });
+      line.appendChild(search);
+      [[conf.typeColumn, 'Тип: любой', 'type'], [conf.statusColumn, 'Статус: любой', 'status'],
+       [conf.courierColumn, 'Курьер: любой', 'courier']].forEach((triple) => {
+        const node = select(triple[1], triple[0], triple[2]);
+        if (node) line.appendChild(node);
+      });
+      const onlyNotes = h('label', 'check');
+      onlyNotes.style.marginTop = '0';
+      const box = h('input');
+      box.type = 'checkbox';
+      box.checked = filters.onlyNotes;
+      box.addEventListener('change', () => { filters.onlyNotes = box.checked; renderTable(); });
+      onlyNotes.append(box, document.createTextNode('с заметкой'));
+      line.appendChild(onlyNotes);
+      body.appendChild(line);
+
+      const holder = h('div', 'table-holder');
+      body.appendChild(holder);
+      renderTable();
+
+      function renderTable() {
+        holder.textContent = '';
+        const rows = visibleRows();
+        if (queueSort.column) {
+          const column = queueSort.column;
+          rows.sort((a, b) => {
+            const left = a.values[column] || '';
+            const right = b.values[column] || '';
+            const leftDate = parseDate(left);
+            const rightDate = parseDate(right);
+            if (leftDate && rightDate) return (leftDate - rightDate) * queueSort.dir;
+            return left.localeCompare(right, 'ru') * queueSort.dir;
+          });
+        }
+        count.textContent = 'Показано ' + rows.length + ' из ' + data.rows.length +
+          (data.error ? ' · ' + data.error : '');
+
+        if (!rows.length) {
+          holder.appendChild(h('div', 'side-empty', data.error || 'Ничего не найдено'));
+          return;
+        }
+
+        const notes = loadNotes();
+        const table = h('table', 'grid');
+        const header = h('tr');
+        data.columns.concat(['Заметка']).forEach((column) => {
+          const cell = h('th', null, column);
+          if (column !== 'Заметка') {
+            cell.title = 'Сортировать по колонке';
+            cell.addEventListener('click', () => {
+              queueSort = { column: column, dir: queueSort.column === column ? -queueSort.dir : 1 };
+              renderTable();
+            });
+          }
+          header.appendChild(cell);
+        });
+        table.appendChild(header);
+
+        rows.forEach((row) => {
+          const tr = h('tr');
+          data.columns.forEach((column) => tr.appendChild(h('td', null, row.values[column] || '')));
+          const note = notes[row.key];
+          const mark = h('td', null, note ? (note.due ? '⏰' : '📝') : '');
+          if (note) mark.title = (note.text || '') + (note.due ? '\nНапомнить: ' + new Date(note.due).toLocaleString() : '');
+          tr.appendChild(mark);
+          if (row.href) {
+            tr.style.cursor = 'pointer';
+            tr.title = 'Открыть тикет в новой вкладке';
+            tr.addEventListener('click', () => window.open(row.href, '_blank'));
+          }
+          table.appendChild(tr);
+        });
+        holder.appendChild(table);
+      }
+    }
+
+    function renderCouriers() {
+      const stats = courierStats(data.rows, conf);
+      count.textContent = 'Курьеров: ' + stats.length + ' · строк в списке: ' + data.rows.length;
+      if (!stats.length) {
+        body.appendChild(h('div', 'side-empty', data.error || 'Нет данных: проверьте колонку курьера в настройках'));
+        return;
+      }
+
+      const hint = h('p', 'hint');
+      hint.innerHTML = 'Все числа — из того же списка тикетов. <b>Тикетов</b> — строк у курьера, ' +
+        '<b>проблемных</b> — из них по отмеченным фасовкам, <b>доля</b> — проблемные ÷ тикетов. ' +
+        'Если фасовки не отмечены, проблемных не будет: отметьте их на вкладке «Панель».';
+      body.appendChild(hint);
+
+      const holder = h('div', 'table-holder');
+      const table = h('table', 'grid');
+      const header = h('tr');
+      [['Курьер', 'Значение колонки «' + conf.courierColumn + '»'],
+       ['Тикетов', 'Сколько строк списка у этого курьера'],
+       ['Проблемных', 'Из них строк с отмеченной фасовкой'],
+       ['Доля', 'Проблемные ÷ тикетов'],
+       ['Последний', 'Самая свежая дата из колонки «' + conf.dateColumn + '»']].forEach((pair) => {
+        const cell = h('th', null, pair[0]);
+        cell.title = pair[1];
+        header.appendChild(cell);
+      });
+      table.appendChild(header);
+
+      stats.forEach((item) => {
+        const tr = h('tr');
+        tr.appendChild(h('td', null, item.courier));
+        tr.appendChild(h('td', null, String(item.total)));
+        tr.appendChild(h('td', null, String(item.flagged)));
+        const share = h('td', null, item.flagged + ' из ' + item.total + ' · ' + Math.round(item.share * 100) + '%');
+        if (item.flagged && item.share >= 0.3) share.className = 'bad-cell';
+        tr.appendChild(share);
+        tr.appendChild(h('td', null, item.last || '—'));
+        table.appendChild(tr);
+      });
+      holder.appendChild(table);
+      body.appendChild(holder);
+    }
+
+    function render() {
+      body.textContent = '';
+      tabList.setAttribute('aria-selected', String(active === 'list'));
+      tabCouriers.setAttribute('aria-selected', String(active === 'couriers'));
+      if (active === 'list') renderList(); else renderCouriers();
+    }
+
+    tabList.addEventListener('click', () => { active = 'list'; render(); });
+    tabCouriers.addEventListener('click', () => { active = 'couriers'; render(); });
+    refresh.addEventListener('click', () => load(true));
+
+    await load(false);
+  }
+
+  // ---------- Заметка по текущему тикету ----------
+
+  let noteSaveTimer = null;
+
+  function noteBlock() {
+    const key = ticketKey(location.href);
+    const note = getNote(key);
+    const box = h('div', 'note-box');
+
+    const area = h('textarea');
+    area.placeholder = 'Заметка по тикету…';
+    area.value = note.text || '';
+    area.addEventListener('input', () => {
+      clearTimeout(noteSaveTimer);
+      noteSaveTimer = setTimeout(() => setNote(key, { text: area.value, fired: false }), 400);
+    });
+    box.appendChild(area);
+
+    const line = h('div', 'line');
+    line.appendChild(h('span', 'pval', 'напомнить'));
+    [['15 мин', 15], ['1 ч', 60], ['3 ч', 180], ['утром', 0]].forEach((pair) => {
+      const button = h('button', 'icon', pair[0]);
+      button.addEventListener('click', () => {
+        let due;
+        if (pair[1]) {
+          due = Date.now() + pair[1] * 60000;
+        } else {
+          const morning = new Date();
+          morning.setHours(9, 0, 0, 0);
+          if (morning.getTime() <= Date.now()) morning.setDate(morning.getDate() + 1);
+          due = morning.getTime();
+        }
+        setNote(key, { text: area.value, due: due, fired: false });
+        toast('Напомню ' + new Date(due).toLocaleString());
+        updateSidePanel();
+      });
+      line.appendChild(button);
+    });
+    if (note.due) {
+      const clear = h('button', 'icon', '✕');
+      clear.title = 'Снять напоминание';
+      clear.addEventListener('click', () => {
+        setNote(key, { due: 0, fired: false });
+        toast('Напоминание снято');
+        updateSidePanel();
+      });
+      line.appendChild(clear);
+    }
+    box.appendChild(line);
+
+    if (note.due) {
+      const when = h('div', 'pval');
+      when.textContent = 'Напомню: ' + new Date(note.due).toLocaleString();
+      box.appendChild(when);
+    }
+    return box;
+  }
+
+  // ---------- Фоновые проверки ----------
+
+  let queueTimer = null;
+  let noteTimer = null;
+
+  function loadSeen() {
+    try {
+      const raw = hasGM ? GM_getValue(SEEN_KEY, null) : localStorage.getItem(SEEN_KEY);
+      const parsed = typeof raw === 'string' && raw ? JSON.parse(raw) : raw;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) { return []; }
+  }
+
+  function saveSeen(keys) {
+    try {
+      const json = JSON.stringify(keys.slice(-500));
+      if (hasGM) GM_setValue(SEEN_KEY, json); else localStorage.setItem(SEEN_KEY, json);
+    } catch (e) {}
+  }
+
+  function notifyUser(title, text) {
+    toast(title + (text ? ' — ' + text : ''));
+    if (!queueConfig().notify) return;
+    try {
+      if (typeof Notification === 'undefined') return;
+      if (Notification.permission === 'granted') new Notification(title, { body: text || '' });
+      else if (Notification.permission !== 'denied') Notification.requestPermission();
+    } catch (e) { /* уведомления запрещены — остаётся всплывашка */ }
+  }
+
+  async function checkQueueUpdates() {
+    const data = await fetchQueue(true);
+    if (!data.rows.length) return;
+    const seen = loadSeen();
+    const fresh = data.rows.filter((row) => seen.indexOf(row.key) === -1);
+    saveSeen(data.rows.map((row) => row.key));
+    if (!seen.length || !fresh.length) return;            // первый проход молчит
+    const conf = queueConfig();
+    const preview = fresh.slice(0, 3)
+      .map((row) => row.values[conf.typeColumn] || row.values[data.columns[0]] || '')
+      .filter(Boolean).join('; ');
+    notifyUser('Новых тикетов: ' + fresh.length, preview);
+  }
+
+  function checkNoteReminders() {
+    dueNotes().forEach((note) => {
+      markNoteFired(note.key);
+      notifyUser('Напоминание по тикету ' + note.key, note.text || '');
+    });
+  }
+
+  function startWatchers() {
+    if (window.top !== window.self) return;
+    const conf = queueConfig();
+    clearInterval(queueTimer);
+    clearInterval(noteTimer);
+    noteTimer = setInterval(checkNoteReminders, 60000);
+    setTimeout(checkNoteReminders, 2000);
+    if (!conf.enabled || !siteMatches(panelConfig().site)) return;
+    const everyMs = Math.max(1, Number(conf.refreshMin) || 5) * 60000;
+    queueTimer = setInterval(checkQueueUpdates, everyMs);
+    setTimeout(checkQueueUpdates, 5000);
+  }
+
+  // ========================== 14. СТАРТ ==========================
 
   reloadTemplates();
   ensureFab();
   updateSidePanel();
+  startWatchers();
   if (window.top === window.self) watchUrlChanges(updateSidePanel);
 
   if (window.top === window.self && typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('Настроить автоответы', () => openSettings());
     GM_registerMenuCommand('Показать список автоответов', () => openPicker());
+    GM_registerMenuCommand('Очередь тикетов', () => openQueue());
   }
 })();
