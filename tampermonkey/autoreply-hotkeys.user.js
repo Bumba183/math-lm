@@ -2,8 +2,8 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      2.8.0
-// @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам, помощник на модели и автоподстановка проверенных шагов.
+// @version      2.9.0
+// @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам, оценка риска по формуле, разбор фото клада и помощник на модели.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
 // @license      MIT
@@ -87,6 +87,10 @@
         mode: 'text' },
 
       // Страница заказа: не вышел ли срок годности
+      { label: 'Курьер', source: 'label', query: 'Курьер', selector: '', attr: '', regex: '', mode: 'text' },
+      // «Клад» на странице тикета ведёт на карточку выкладки, там есть тип: камень, магнит, прикоп
+      { label: 'Тип клада', source: 'label', query: 'Тип', linkSelector: 'Клад', selector: '', attr: '',
+        regex: '', mode: 'text' },
       { label: 'Дата загрузки', source: 'label', query: 'Дата загрузки', selector: '', attr: '', regex: '', mode: 'text' },
       { label: 'Дата покупки', source: 'label', query: 'Дата создания заказа', selector: '', attr: '', regex: '', mode: 'text' },
       { label: 'Пролежал до покупки', source: 'between', from: 'Дата загрузки', to: 'Дата покупки' },
@@ -104,6 +108,10 @@
       { label: 'Тикетов по проблемным фасовкам', source: 'count', table: '*', column: '', value: '', exclude: false,
         linkSelector: 'Покупатель -> Подробнее#2', pages: 5, rowSelector: '', whereSelector: '', whereText: '',
         usePacks: true },
+      // счётчик ненаходов в профиле у многих пустой; надёжнее считать по типу тикета
+      { label: 'Ненаходов в тикетах', source: 'count', table: '*', column: 'Тип', value: 'ненаход', exclude: false,
+        linkSelector: 'Покупатель -> Подробнее#2', pages: 5, rowSelector: '', whereSelector: '', whereText: '',
+        usePacks: false },
       { label: 'Доля проблемных', source: 'ratio', from: 'Тикетов по проблемным фасовкам', to: 'Заказов в списке' }
     ]
   };
@@ -120,6 +128,21 @@
     blocked: ''
   };
 
+  /**
+   * Сигналы из переписки и обстоятельств поиска. Формат строки:
+   *   Название | слова через запятую | баллы
+   * Плюс — довод против покупателя, минус — в его пользу. Правится в настройках.
+   */
+  const DEFAULT_SIGNALS = [
+    '# Как искали — из переписки. Плюс к риску, минус в пользу покупателя.',
+    'Искал в темноте | ночь, ночью, темно, в темноте, фонар, фарами, фары, поздно вечером | 12',
+    'Искал не один | вдвоем, втроем, с другом, с братом, с женой, с девушкой, искали вместе, искали втроем | 10',
+    'Не дошёл до места | не доехал, не дошел, не смог приехать, был рядом | 8',
+    'Просит деньги сразу | верните деньги, возврат средств, компенсацию сразу, требую возврат | 8',
+    'Искал повторно при свете | повторил поиск, повторно искал, днем искал, утром искал, при свете дня | -12',
+    'Прислал фото места | фото прилагаю, на фото, прикладываю фото, скину фото | -8'
+  ].join('\n');
+
   const DEFAULT_AI = {
     enabled: false,
     base: 'https://api.aitunnel.ru/v1',
@@ -131,6 +154,7 @@
     chatSelector: '',
     tone: 'Вежливо, по-деловому, на «вы», без канцелярита и лишних извинений.',
     ruleFirst: false,                  // правила только подсказывают: решает модель, прочитав переписку
+    signals: DEFAULT_SIGNALS,          // сигналы переписки для оценки риска
     auto: DEFAULT_AUTO,
     playbook: [
       '# Шаги разбирательства. «если» — слова-правило (сработает без модели),',
@@ -296,7 +320,8 @@
       done.push('paid1');
       if (fields && fields.length) {
         const has = (label) => fields.some((field) => field && field.label === label);
-        ['Оплаченных заказов', 'Замен', 'Ненаходов', 'Купонов', 'Дата регистрации'].forEach((label) => {
+        ['Оплаченных заказов', 'Замен', 'Ненаходов', 'Ненаходов в тикетах', 'Купонов',
+         'Дата регистрации', 'Курьер', 'Тип клада'].forEach((label) => {
           if (has(label)) return;
           const sample = DEFAULT_PANEL.fields.filter((field) => field.label === label)[0];
           if (sample) fields.push(Object.assign({}, sample));
@@ -2335,6 +2360,23 @@
       bookLabel.append(bookArea, bookCount);
       body.appendChild(bookLabel);
 
+      const signalLabel = h('label', null, 'Сигналы для оценки риска: Название | слова | баллы');
+      signalLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:12px;';
+      const signalArea = h('textarea', 'small');
+      signalArea.spellcheck = false;
+      signalArea.value = ai.signals == null ? DEFAULT_SIGNALS : ai.signals;
+      signalArea.style.marginTop = '4px';
+      const signalCount = h('div', 'pval');
+      const countSignals = () => {
+        const list = parseSignals(signalArea.value);
+        signalCount.textContent = 'Сигналов: ' + list.length + '. Плюс — довод против покупателя, ' +
+          'минус — в его пользу; ищутся по переписке целиком.';
+      };
+      signalArea.addEventListener('input', () => { ai.signals = signalArea.value; countSignals(); });
+      countSignals();
+      signalLabel.append(signalArea, signalCount);
+      body.appendChild(signalLabel);
+
       const importBox = h('div');
       importBox.style.marginTop = '14px';
       const importHint = h('p', 'hint');
@@ -2890,6 +2932,19 @@
     });
   }
 
+  /**
+   * Первое число строки. «Кол-во купонов: 2 (700 руб)» — это два купона, а не 2700:
+   * parseNumber склеивает все цифры подряд и на таких значениях врёт в сотни раз.
+   * Пробелы внутри числа остаются разделителем разрядов: «1 234 шт» — это 1234.
+   */
+  function firstNumber(text) {
+    const found = /(\d[\d\s\u00a0]*)(?:[.,](\d+))?/.exec(String(text == null ? '' : text));
+    if (!found) return null;
+    const whole = found[1].replace(/[\s\u00a0]/g, '');
+    const value = parseFloat(found[2] ? whole + '.' + found[2] : whole);
+    return isFinite(value) ? value : null;
+  }
+
   function parseNumber(text) {
     const cleaned = String(text).replace(/[^\d,.\-]/g, '').replace(/\s/g, '').replace(',', '.');
     const value = parseFloat(cleaned);
@@ -3098,6 +3153,14 @@
   const VALUE_TAGS = { TD: 1, TH: 1, DD: 1, DT: 1, SPAN: 1, DIV: 1, P: 1, B: 1, STRONG: 1, A: 1 };
 
   function nodeText(node) {
+    if (node && node.tagName === 'SELECT') {
+      const picked = node.options && node.options[node.selectedIndex];   // иначе склеятся все пункты
+      return String((picked && picked.textContent) || '').replace(/\s+/g, ' ').trim();
+    }
+    if (node && node.querySelector) {
+      const select = node.tagName === 'SELECT' ? node : node.querySelector('select');
+      if (select && normalizeText(node.textContent) === normalizeText(select.textContent)) return nodeText(select);
+    }
     return String((node && (node.innerText || node.textContent)) || '').replace(/\s+/g, ' ').trim();
   }
 
@@ -3126,9 +3189,9 @@
   }
 
   /** Значение из строки «подпись → значение». */
-  function valueByLabel(query) {
+  function valueByLabel(query, doc) {
     const needle = normalizeText(query);
-    const candidates = labelCandidates(document, query);
+    const candidates = labelCandidates(doc || document, query);
     for (let i = 0; i < candidates.length; i++) {
       const text = nodeText(candidates[i]);
       if (text && normalizeText(text) !== needle) return text;
@@ -3227,7 +3290,8 @@
       const read = (name) => {
         const raw = String(extractField(byLabel(name), allFields).value || '');
         if (!raw || raw === '…' || raw.indexOf('⚠') === 0) return null;
-        return { num: parseNumber(raw), partial: raw.indexOf('≥') !== -1 };
+        const num = firstNumber(raw);
+        return num == null ? null : { num: num, partial: raw.indexOf('≥') !== -1 };
       };
       const from = read(field.from);
       const to = read(field.to);
@@ -3276,6 +3340,13 @@
 
     let nodes;
     if (field.source === 'label') {
+      // с переходом по ссылке: «Клад -> Тип» читает подпись уже на странице клада
+      if (String(field.linkSelector || '').trim()) {
+        const scope = countScope(field);
+        if (typeof scope === 'string') return { value: scope };
+        if (!scope) return { value: '' };
+        return { value: applyRegex(valueByLabel(field.query, scope), field.regex) };
+      }
       const value = valueByLabel(field.query);
       return { value: applyRegex(value, field.regex) };
     }
@@ -3922,9 +3993,14 @@
         reject(new Error('Нет доступа GM_xmlhttpRequest — переустановите скрипт в Tampermonkey'));
         return;
       }
+      // с картинками сообщение становится списком частей — так их принимает OpenAI-совместимый шлюз
+      const images = (opts.images || []).filter(Boolean);
+      const content = images.length
+        ? [{ type: 'text', text: user }].concat(images.map((url) => ({ type: 'image_url', image_url: { url: url } })))
+        : user;
       const body = {
         model: String(conf.model || DEFAULT_AI.model).trim(),
-        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+        messages: [{ role: 'system', content: system }, { role: 'user', content: content }],
         temperature: opts.temperature != null ? opts.temperature : Number(conf.temperature) || 0.3,
         max_tokens: Number(conf.maxTokens) || 900
       };
@@ -4014,11 +4090,12 @@
    * (только он расставляет переводы строк по-человечески) и вычитаем строки,
    * пришедшие из меню и шапок.
    */
-  function contentText(node) {
+  function contentText(node, options) {
     if (!node) return '';
     const drop = menuLines(node);
+    const noise = PAGE_NOISE + ((options && options.dropTables) ? ', table' : '');
     try {
-      Array.prototype.forEach.call(node.querySelectorAll(PAGE_NOISE), (el) => {
+      Array.prototype.forEach.call(node.querySelectorAll(noise), (el) => {
         String(el.innerText || el.textContent || '').split('\n').forEach((line) => {
           const clean = line.replace(/\s+/g, ' ').trim();
           if (clean) drop.add(clean);
@@ -4037,6 +4114,10 @@
    * Самый похожий на переписку блок страницы: несколько однотипных соседей с текстом.
    * Так диалог находится без селектора — на любой вёрстке, где сообщения идут подряд.
    */
+  // Сообщение почти всегда несёт время или дату — по этому переписка и отличается
+  // от боковой колонки с полями тикета, где строки короткие и без времени.
+  const TIME_MARK = /\d{1,2}[:.]\d{2}|\d{1,2}\s+(?:январ|феврал|март|апрел|мая|май|июн|июл|август|сентябр|октябр|ноябр|декабр)/i;
+
   function guessChatRoot(doc, minKids) {
     const scope = doc || document;
     const least = Math.max(2, Number(minKids) || 3);
@@ -4057,8 +4138,13 @@
       const same = Object.keys(tags).reduce((max, tag) => Math.max(max, tags[tag]), 0);
       if (same < least || same < kids.length * 0.6) return;                      // разнородная мешанина
 
-      const length = kids.reduce((sum, kid) => sum + nodeText(kid).length, 0);
-      const score = length * Math.min(same, 12);            // важны и объём, и число сообщений
+      const texts = kids.map((kid) => nodeText(kid));
+      const length = texts.reduce((sum, text) => sum + text.length, 0);
+      const withTime = texts.filter((text) => TIME_MARK.test(text)).length / kids.length;
+      const long = texts.filter((text) => text.length >= 60).length / kids.length;
+
+      // важны объём, число сообщений и то, насколько дети похожи на реплики
+      const score = length * Math.min(same, 12) * (1 + 2 * withTime + long);
       if (score > bestScore) { bestScore = score; best = node; }
     });
     return best;
@@ -4083,16 +4169,20 @@
 
     const guess = guessChatRoot();
     if (guess) {
+      const messages = chatMessages(guess).map((node) => contentText(node)).filter(Boolean);
+      if (messages.length) {
+        return { from: 'блок диалога найден сам (' + messages.length + ' сообщ.)', text: messages.join('\n\n') };
+      }
       const text = contentText(guess);
       if (text) return { from: 'блок диалога найден сам', text: text };
     }
 
     const main = document.querySelector('main, article, [role="main"], #content, .content, #main');
     if (main) {
-      const text = contentText(main);
+      const text = contentText(main, { dropTables: true });     // таблицы — это поля тикета, не реплики
       if (text) return { from: 'основная часть страницы', text: text };
     }
-    return { from: 'вся страница без меню', text: contentText(document.body) };
+    return { from: 'вся страница без меню и таблиц', text: contentText(document.body, { dropTables: true }) };
   }
 
   function aiPageText() {
@@ -4659,6 +4749,25 @@
       ].join('\n')
     },
 
+    photo: {
+      icon: '📷',
+      title: 'Фото клада',
+      kind: 'text',
+      images: true,
+      system: AI_RULES + ' Ты смотришь фото закладки глазами покупателя, который ищет её на местности.',
+      build: (context) => [
+        'ЗАДАЧА: посмотри на фото места и оцени, насколько закладку реально найти.',
+        'Скажи по пунктам: 1) что на фото и какой фон; 2) насколько упаковка выделяется по цвету и форме',
+        '(синий пакет в траве заметен, чёрный камень среди камней — нет); 3) есть ли ориентиры, по которым',
+        'покупатель мог промахнуться; 4) вывод: похоже ли, что покупатель мог честно не найти.',
+        'Про сам товар не рассуждай — только видимость и ориентиры.',
+        '',
+        'ДАННЫЕ:', factsBlock(context),
+        '',
+        'ЧТО ПИШЕТ ПОКУПАТЕЛЬ:', context.chat
+      ].join('\n')
+    },
+
     fields: {
       icon: '📦',
       title: 'Разобрать данные',
@@ -4703,6 +4812,63 @@
     }
   };
 
+  // ---------- Фото клада ----------
+
+  /** Картинки страницы: сначала карточка клада по ссылке, иначе то, что есть на тикете. */
+  function pageImages(doc) {
+    const scope = doc || document;
+    let nodes = [];
+    try { nodes = Array.prototype.slice.call(scope.querySelectorAll('img[src]')); } catch (e) { return []; }
+    return nodes
+      .map((img) => {
+        const width = img.naturalWidth || img.width || 0;
+        const height = img.naturalHeight || img.height || 0;
+        let url = '';
+        try { url = new URL(img.getAttribute('src'), docUrl(scope)).href; } catch (e) { url = ''; }
+        return { url: url, area: width * height, alt: img.getAttribute('alt') || '' };
+      })
+      .filter((item) => item.url && /^https?:/i.test(item.url) && !/\.svg($|\?)/i.test(item.url))
+      .filter((item, index, list) => list.findIndex((other) => other.url === item.url) === index)
+      .sort((a, b) => b.area - a.area);
+  }
+
+  /**
+   * Картинки клада: идём по ссылке «Клад», если она есть, и берём оттуда.
+   * Страницу читаем сами, а не через кэш панели: там первый вызов возвращает «…».
+   */
+  async function stashImages() {
+    const url = findLinkInDoc(document, 'Клад');
+    if (url) {
+      try {
+        if (new URL(url).origin === location.origin) {
+          const response = await fetch(url, { credentials: 'include' });
+          if (response.ok) {
+            const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+            doc.arhUrl = url;
+            const found = pageImages(doc);
+            if (found.length) return { images: found, from: 'карточка клада' };
+          }
+        }
+      } catch (e) { /* не открылась — берём то, что есть на тикете */ }
+    }
+    return { images: pageImages(document), from: 'страница тикета' };
+  }
+
+  /** Картинка в data:-строку: чужой домен модель сама не откроет. */
+  function imageAsData(url) {
+    return fetch(url, { credentials: 'include' })
+      .then((response) => (response.ok ? response.blob() : Promise.reject(new Error('HTTP ' + response.status))))
+      .then((blob) => {
+        if (blob.size > 4 * 1024 * 1024) throw new Error('картинка тяжелее 4 МБ');
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ''));
+          reader.onerror = () => reject(new Error('не прочиталась'));
+          reader.readAsDataURL(blob);
+        });
+      });
+  }
+
   // ---------- Риск покупателя: считает код, не модель ----------
 
   /**
@@ -4710,66 +4876,207 @@
    * десять тикетов на сто заказов и десять на десять это разные покупатели.
    * Веса подобраны так, чтобы сумма доходила до 100 только при откровенном перекосе.
    */
+  /**
+   * Слагаемые риска. Две группы, и это принципиально: «обращения» и «компенсации».
+   * Внутри группы у слагаемых общий потолок, потому что они об одном и том же —
+   * если каждый тикет и есть ненаход, нельзя посчитать его дважды.
+   */
   const RISK_PARTS = [
-    { key: 'Тикетов', labels: ['Тикетов всего', 'Тикетов в списке'], weight: 80, max: 40,
+    { key: 'Тикетов', group: 'claims', labels: ['Тикетов всего', 'Тикетов в списке'], weight: 80, max: 40,
       note: 'обращений на один оплаченный заказ' },
-    { key: 'Ненаходов', labels: ['Ненаходов'], weight: 50, max: 25, note: 'ненаходов на заказ' },
-    { key: 'Замен', labels: ['Замен'], weight: 45, max: 15, note: 'замен на заказ' },
-    { key: 'Купонов', labels: ['Купонов'], weight: 30, max: 10, note: 'активированных купонов на заказ' },
-    { key: 'Проблемных фасовок', labels: ['Тикетов по проблемным фасовкам'], weight: 20, max: 10,
-      note: 'тикетов по проблемным фасовкам на заказ' }
+    { key: 'Ненаходов', group: 'claims', labels: ['Ненаходов в тикетах', 'Ненаходов'], weight: 60, max: 30,
+      note: 'ненаходов на заказ; с тикетами у них общий потолок' },
+    { key: 'Проблемных фасовок', group: 'claims', labels: ['Тикетов по проблемным фасовкам'], weight: 20, max: 10,
+      note: 'тикетов по проблемным фасовкам на заказ' },
+    { key: 'Замен', group: 'comp', labels: ['Замен'], weight: 45, max: 25, note: 'замен на заказ' },
+    { key: 'Купонов', group: 'comp', labels: ['Купонов'], weight: 30, max: 20,
+      note: 'активированных купонов на заказ' }
   ];
+
+  const RISK_GROUPS = {
+    claims: { title: 'Обращения', max: 55 },
+    comp: { title: 'Компенсации', max: 45 },
+    search: { title: 'Как искали', max: 25, min: -25 },
+    around: { title: 'Обстоятельства', max: 10, min: -25 }
+  };
 
   const RISK_BASE = ['Оплаченных заказов', 'Заказов в списке', 'Заказов всего'];
   const SMALL_BASE = 5;                                   // меньше — статистики нет, потолок ниже
   const SMALL_CAP = 45;
+  const SANE_RATIO = 3;                                   // больше трёх на заказ — это уже не количество
+
+  /** Сумма — не количество: «2 700 руб» в долю пускать нельзя. */
+  function looksLikeMoney(text) {
+    const value = String(text || '');
+    // «700 руб» — сумма; «2 (700 руб)» — количество с суммой в скобках, и это нормально
+    return /^[^\d]*[\d\s\u00a0.,]+\s*(руб|₽|\$|€|коп)/i.test(value);
+  }
 
   function factNumber(facts, labels) {
     for (let i = 0; i < labels.length; i++) {
       const found = facts.filter((fact) => fact.label === labels[i])[0];
-      if (found && /\d/.test(String(found.value))) return { label: labels[i], value: parseNumber(found.value) };
+      if (!found || !/\d/.test(String(found.value))) continue;
+      const value = firstNumber(found.value);
+      if (value == null) continue;
+      return { label: labels[i], value: value, raw: String(found.value), money: looksLikeMoney(found.value) };
     }
     return null;
   }
 
-  /**
-   * Оценка риска по числам панели. Ничего не выдумывает: каждое слагаемое видно
-   * вместе с формулой, а при малой базе оценка честно упирается в потолок.
-   */
-  function riskScore(facts) {
-    const base = factNumber(facts, RISK_BASE);
-    if (!base || !base.value) {
-      return { score: 0, level: 'нет данных', base: base, parts: [], capped: false,
-               why: 'Не нашлось числа оплаченных заказов — считать долю не от чего.' };
+  /** Разбор строк «Название | слова | баллы». */
+  function parseSignals(text) {
+    return String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && line.charAt(0) !== '#')
+      .map((line) => {
+        const parts = line.split('|');
+        if (parts.length < 3) return null;
+        const words = parts[1].split(',').map(normalizeText).filter(Boolean);
+        const points = Math.round(Number(String(parts[2]).replace(',', '.')) || 0);
+        return words.length && points ? { title: parts[0].trim(), words: words, points: points } : null;
+      })
+      .filter(Boolean);
+  }
+
+  /** Какие сигналы нашлись в переписке. Показываем и слово, по которому сработало. */
+  function matchSignals(chat, text) {
+    const haystack = normalizeText(chat);
+    if (!haystack) return [];
+    return parseSignals(text).map((signal) => {
+      const hit = signal.words.filter((word) => haystack.indexOf(word) !== -1)[0];
+      return hit ? { key: signal.title, group: 'search', points: signal.points, word: hit,
+                     note: 'сработало слово «' + hit + '»' } : null;
+    }).filter(Boolean);
+  }
+
+  /** Поправки по обстоятельствам: сколько товар пролежал и как дела у курьера. */
+  function aroundParts(facts) {
+    const out = [];
+    const value = (label) => {
+      const found = facts.filter((fact) => fact.label === label)[0];
+      return found ? String(found.value) : '';
+    };
+
+    const up = parseDate(value('Дата загрузки'));
+    const buy = parseDate(value('Дата покупки'));
+    const limit = Number(panelConfig().limitDays) || 0;
+    if (up && buy && limit > 0) {
+      const days = (buy.getTime() - up.getTime()) / 86400000;
+      if (days > limit) {
+        out.push({ key: 'Долго лежал до покупки', group: 'around', points: -10,
+                   note: Math.round(days) + ' дн. при пороге ' + limit + ' — клад мог не дожить до покупателя' });
+      }
     }
 
-    const parts = [];
-    let total = 0;
+    const courier = value('Курьер');
+    if (courier) {
+      const stats = courierShare(courier);
+      if (stats) {
+        const percent = Math.round(stats.share * 100);
+        out.push(stats.share >= 0.2
+          ? { key: 'Курьер и сам проблемный', group: 'around', points: -10,
+              note: courier + ': ' + stats.tickets + ' тикетов на ' + stats.orders + ' выкладок — ' + percent + '%' }
+          : { key: 'У курьера всё ровно', group: 'around', points: 6,
+              note: courier + ': ' + stats.tickets + ' тикетов на ' + stats.orders + ' выкладок — ' + percent + '%' });
+      }
+    }
+    return out;
+  }
+
+  /** Доля тикетов у курьера по прочитанным спискам; null, если списки ещё не читали. */
+  function courierShare(courier) {
+    const conf = resolveColumns(queueConfig(), queueCache.columns).conf;
+    const orderConf = resolveColumns(ordersConfig(), ordersCache.columns).conf;
+    const name = String(courier || '').trim();
+    if (!name || !ordersCache.rows.length) return null;
+    const same = (row, column) => String(row.values[column] || '').trim() === name;
+    const orders = ordersCache.rows.filter((row) => same(row, orderConf.courierColumn)).length;
+    if (!orders) return null;
+    const tickets = queueCache.rows.filter((row) => same(row, conf.courierColumn)).length;
+    return { orders: orders, tickets: tickets, share: tickets / orders };
+  }
+
+  /**
+   * Оценка риска по числам панели. Ничего не выдумывает: каждое слагаемое видно
+   * вместе с формулой, у групп общий потолок, а всё, что не похоже на количество,
+   * откладывается в сторону с объяснением — вместо «7297%» в расчёте.
+   */
+  function riskScore(facts, chat) {
+    const base = factNumber(facts, RISK_BASE);
+    const extra = matchSignals(chat || '', aiConfig().signals).concat(aroundParts(facts));
+    if (!base || !base.value) {
+      const groups = groupUp(extra);
+      const only = groups.reduce((sum, group) => sum + group.points, 0);
+      return { score: Math.max(0, Math.min(100, only)), level: only >= 30 ? 'средний' : 'низкий',
+               base: null, parts: extra, skipped: [], groups: groups, capped: false,
+               why: 'Числа оплаченных заказов нет — считаем только по переписке и обстоятельствам.' };
+    }
+
+    const parts = extra.slice();
+    const skipped = [];
     RISK_PARTS.forEach((part) => {
       const found = factNumber(facts, part.labels);
       if (!found) return;
       const ratio = found.value / base.value;
-      const points = Math.min(part.max, Math.round(ratio * part.weight));
-      total += points;
-      parts.push({ key: part.key, from: found.label, count: found.value, ratio: ratio,
-                   points: points, max: part.max, note: part.note });
+      if (found.money) {
+        skipped.push({ key: part.key, from: found.label, raw: found.raw,
+                       why: 'это сумма, а не количество' });
+        return;
+      }
+      if (ratio > SANE_RATIO) {
+        skipped.push({ key: part.key, from: found.label, raw: found.raw,
+                       why: 'на заказ приходится ' + Math.round(ratio * 100) + '% — строка панели считает не то' });
+        return;
+      }
+      parts.push({ key: part.key, group: part.group, from: found.label, count: found.value, ratio: ratio,
+                   points: Math.min(part.max, Math.round(ratio * part.weight)), max: part.max, note: part.note });
     });
 
+    // групповой потолок: тикеты и ненаходы описывают одно поведение, складывать их целиком нельзя
+    const groups = groupUp(parts);
+    const total = groups.reduce((sum, group) => sum + group.points, 0);
     const capped = base.value < SMALL_BASE && total > SMALL_CAP;
     const score = Math.max(0, Math.min(100, capped ? SMALL_CAP : total));
     const level = score >= 60 ? 'высокий' : (score >= 30 ? 'средний' : 'низкий');
     return {
-      score: score, level: level, base: base, parts: parts, capped: capped,
+      score: score, level: level, base: base, parts: parts, skipped: skipped, groups: groups, capped: capped,
       why: base.value < SMALL_BASE
         ? 'Оплаченных заказов меньше ' + SMALL_BASE + ' — выводы ненадёжны, оценка выше ' + SMALL_CAP + ' не поднимается.'
         : ''
     };
   }
 
+  /** Складывает слагаемые по группам и упирает каждую в её потолок. */
+  function groupUp(parts) {
+    return Object.keys(RISK_GROUPS).map((key) => {
+      const inside = parts.filter((part) => part.group === key);
+      const raw = inside.reduce((sum, part) => sum + part.points, 0);
+      const top = RISK_GROUPS[key].max;
+      const bottom = RISK_GROUPS[key].min === undefined ? 0 : RISK_GROUPS[key].min;
+      const points = Math.max(bottom, Math.min(top, raw));
+      return { key: key, title: RISK_GROUPS[key].title, raw: raw, points: points, max: top,
+               capped: raw !== points, count: inside.length };
+    }).filter((group) => group.count);
+  }
+
   /** Строки с расчётом — их же показываем модели, чтобы она не пересчитывала. */
   function riskLines(risk) {
-    return risk.parts.map((part) => '- ' + part.key + ': ' + part.count + ' ÷ ' + risk.base.value + ' = ' +
-      Math.round(part.ratio * 100) + '% → ' + part.points + ' из ' + part.max + ' баллов');
+    const lines = [];
+    risk.groups.forEach((group) => {
+      lines.push(group.title + ': ' + group.points + ' из ' + group.max +
+        (group.capped ? ' (общий потолок группы сработал)' : ''));
+      risk.parts.filter((part) => part.group === group.key).forEach((part) => {
+        lines.push(part.ratio !== undefined && risk.base
+          ? '- ' + part.key + ': ' + part.count + ' ÷ ' + risk.base.value + ' = ' +
+            Math.round(part.ratio * 100) + '% → ' + part.points + ' из ' + part.max + ' баллов'
+          : '- ' + part.key + ': ' + (part.points > 0 ? '+' : '') + part.points + ' балл. (' +
+            (part.note || '') + ')');
+      });
+    });
+    risk.skipped.forEach((item) => {
+      lines.push('- ' + item.key + ': не считали, «' + item.raw + '» — ' + item.why);
+    });
+    return lines;
   }
 
   // ---------- Запуск и показ результата ----------
@@ -4789,7 +5096,29 @@
     aiBusy = true;
     showAiWindow(task, { state: 'loading', prompt: prompt });
     try {
-      const answer = await aiAsk(task.system, prompt, {});
+      let images = [];
+      let note = '';
+      if (task.images) {
+        const found = await stashImages();
+        const picked = found.images.slice(0, 3);
+        if (!picked.length) {
+          showAiWindow(task, { state: 'error', prompt: prompt,
+            text: 'Фото не нашлось: ни на карточке клада, ни на странице тикета.' });
+          return;
+        }
+        const data = [];
+        for (let i = 0; i < picked.length; i++) {
+          try { data.push(await imageAsData(picked[i].url)); }
+          catch (e) { note += 'Не прочиталась картинка: ' + (e && e.message || e) + '. '; }
+        }
+        if (!data.length) {
+          showAiWindow(task, { state: 'error', prompt: prompt, text: note || 'Картинки не прочитались' });
+          return;
+        }
+        images = data;
+        note = 'Отправлено фото: ' + data.length + ' (' + found.from + '). ' + note;
+      }
+      const answer = await aiAsk(task.system, prompt, { images: images });
       const logId = logDecision({ task: taskId, source: 'model', offer: String(answer).slice(0, 400) });
       const parsed = task.kind === 'json' ? parseJsonLoose(answer) : answer;
       if (task.kind === 'json' && !parsed) {
@@ -4797,7 +5126,7 @@
           note: 'Модель ответила не JSON — показываю как есть' });
       } else {
         showAiWindow(task, { state: task.kind, data: parsed, text: answer, prompt: prompt, taskId: taskId,
-          logId: logId });
+          logId: logId, note: note || undefined });
       }
     } catch (error) {
       showAiWindow(task, { state: 'error', text: String(error && error.message || error), prompt: prompt });
@@ -5021,7 +5350,7 @@
   /** Окно риска: сначала расчёт по числам панели, и только по кнопке — слово модели. */
   function showRiskWindow() {
     const facts = aiFacts();
-    const risk = riskScore(facts);
+    const risk = riskScore(facts, aiPageText());
     const overlay = createOverlay();
     const panel = h('div', 'panel');
     overlay.appendChild(panel);
@@ -5045,7 +5374,9 @@
     hint.style.marginTop = '0';
     hint.innerHTML = 'Считает скрипт, а не модель. Принцип один: всё меряется <b>долей от оплаченных ' +
       'заказов</b> — десять тикетов на сто заказов и десять на десять это разные покупатели. ' +
-      'Каждое слагаемое ограничено своим потолком, сумма — 100.';
+      'Слагаемые собраны в две группы с общим потолком: <b>обращения</b> (тикеты, ненаходы, проблемные ' +
+      'фасовки) — до 55, <b>компенсации</b> (замены, купоны) — до 45. Общий потолок нужен, чтобы одно и ' +
+      'то же поведение не считалось дважды: если каждый тикет и есть ненаход, это один факт, а не два.';
     body.appendChild(hint);
 
     if (!risk.parts.length) {
@@ -5061,20 +5392,41 @@
         header.appendChild(cell);
       });
       table.appendChild(header);
-      risk.parts.forEach((part) => {
-        const tr = h('tr');
-        tr.title = part.note;
-        tr.appendChild(h('td', null, part.key));
-        tr.appendChild(h('td', null, part.count + ' из ' + risk.base.value));
-        tr.appendChild(h('td', null, Math.round(part.ratio * 100) + '%'));
-        const points = h('td', null, part.points + ' из ' + part.max);
-        if (part.points >= part.max) points.className = 'bad-cell';
-        tr.appendChild(points);
-        table.appendChild(tr);
+      risk.groups.forEach((group) => {
+        const groupRow = h('tr');
+        const cell = h('th', null, group.title + ': ' + group.points + ' из ' + group.max +
+          (group.capped ? ' (сумма слагаемых ' + group.raw + ' — упёрлась в потолок)' : ''));
+        cell.colSpan = 4;
+        cell.style.cssText = 'background:transparent;font-size:11px;padding-top:10px';
+        groupRow.appendChild(cell);
+        table.appendChild(groupRow);
+
+        risk.parts.filter((part) => part.group === group.key).forEach((part) => {
+          const tr = h('tr');
+          tr.title = part.note || '';
+          tr.appendChild(h('td', null, part.key));
+          const counted = part.ratio !== undefined && risk.base;
+          tr.appendChild(h('td', null, counted ? part.count + ' из ' + risk.base.value : (part.note || '—')));
+          tr.appendChild(h('td', null, counted ? Math.round(part.ratio * 100) + '%' : '—'));
+          const points = h('td', null, counted ? part.points + ' из ' + part.max
+                                               : (part.points > 0 ? '+' + part.points : String(part.points)));
+          if (counted && part.points >= part.max) points.className = 'bad-cell';
+          if (!counted) points.className = part.points > 0 ? 'bad-cell' : 'good-cell';
+          tr.appendChild(points);
+          table.appendChild(tr);
+        });
       });
       const wrap = h('div', 'table-holder');
       wrap.appendChild(table);
       body.appendChild(wrap);
+
+      risk.skipped.forEach((item) => {
+        const note = h('p', 'hint');
+        note.style.margin = '6px 0 0';
+        note.textContent = '⚠ ' + item.key + ' не считаем: строка «' + item.from + '» = «' + item.raw +
+          '» — ' + item.why + '.';
+        body.appendChild(note);
+      });
     }
 
     if (risk.why) {
@@ -5887,6 +6239,7 @@
       const ticketId = String(row.values[Object.keys(row.values)[0]] || row.key || '').slice(0, 24);
       const note = (result, text) => log.push({
         ticket: ticketId, url: row.href, result: result, text: String(text || '').slice(0, 300),
+        date: String(row.values[queue.dateColumn] || '').slice(0, 40),
         type: String(row.values[queue.typeColumn] || '').slice(0, 80)
       });
 
@@ -6546,7 +6899,7 @@
       stop.disabled = true;
       const progress = h('span', 'pval');
       progress.textContent = 'Закрытыми считаются тикеты со статусом «' + (learn.statusValue || 'любой') +
-        '», максимум ' + learn.limit + ' за прогон.';
+        '», максимум ' + learn.limit + ' за прогон, из ' + queueConfig().pages + ' страниц списка.';
       line.append(start, stop, progress);
       body.appendChild(line);
 
@@ -6592,8 +6945,8 @@
 
         const table = h('table', 'grid');
         const header = h('tr');
-        [['Тикет', 'Номер из списка'], ['Тип', 'Тип обращения'], ['Итог', 'Что вышло с этим тикетом'],
-         ['Куда пошло', 'В какую группу ответов попал'],
+        [['Тикет', 'Номер из списка'], ['Дата', 'Дата тикета из списка'], ['Тип', 'Тип обращения'],
+         ['Итог', 'Что вышло с этим тикетом'], ['Куда пошло', 'В какую группу ответов попал'],
          ['Что прочитано', 'Текст, который скрипт принял за ваш ответ']].forEach((pair) => {
           const cell = h('th', null, pair[0]);
           cell.title = pair[1];
@@ -6610,6 +6963,7 @@
             id.addEventListener('click', () => window.open(line.url, '_blank', 'noopener'));
           }
           tr.appendChild(id);
+          tr.appendChild(h('td', null, line.date || '—'));
           tr.appendChild(h('td', null, line.type || '—'));
           const outcome = h('td', null, line.result);
           if (line.result !== 'прочитан') outcome.className = 'bad-cell';
@@ -6697,6 +7051,12 @@
         chosen.clear();
         holder.textContent = '';
         try {
+          // список перечитываем принудительно: иначе прогон разбирает то, что лежало в кэше,
+          // и свежезакрытые тикеты в него просто не попадают
+          progress.textContent = 'Перечитываю список тикетов…';
+          data = await fetchQueue(true);
+          columnNote = resolveColumns(queueConfig(), data.columns);
+          conf = columnNote.conf;
           result = await learnFromClosed(
             data.rows,
             conf,
