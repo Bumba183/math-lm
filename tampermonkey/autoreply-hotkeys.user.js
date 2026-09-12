@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      2.1.0
+// @version      2.2.0
 // @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам и помощник на модели.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -3387,14 +3387,77 @@ return {
     } catch (e) { return []; }
   }
 
+  function saveLog(log) {
+    try {
+      const json = JSON.stringify(log.slice(-300));
+      if (hasGM) GM_setValue(LOG_KEY, json); else localStorage.setItem(LOG_KEY, json);
+    } catch (e) { /* журнал не критичен */ }
+  }
+
+  /** Тип тикета — чтобы точность считалась по видам обращений, а не в среднем по больнице. */
+  function currentTicketType() {
+    const facts = aiFacts();
+    const found = facts.filter((fact) => /тип/i.test(fact.label))[0];
+    return found ? found.value.slice(0, 60) : '';
+  }
+
   function logDecision(entry) {
     try {
       const log = loadLog();
-      log.push(Object.assign({ ts: Date.now(), url: location.href }, entry));
-      const trimmed = log.slice(-300);
-      const json = JSON.stringify(trimmed);
-      if (hasGM) GM_setValue(LOG_KEY, json); else localStorage.setItem(LOG_KEY, json);
+      const record = Object.assign({
+        id: 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        ts: Date.now(),
+        url: location.href,
+        ticket: ticketKey(location.href),
+        type: currentTicketType()
+      }, entry);
+      log.push(record);
+      saveLog(log);
+      return record.id;
+    } catch (e) { return ''; }
+  }
+
+  /** Дополняет запись журнала: принято ли предложение и правил ли его оператор. */
+  function logUpdate(id, patch) {
+    if (!id) return;
+    try {
+      const log = loadLog();
+      for (let i = log.length - 1; i >= 0; i--) {
+        if (log[i].id === id) {
+          Object.assign(log[i], patch);
+          saveLog(log);
+          return;
+        }
+      }
     } catch (e) { /* журнал не критичен */ }
+  }
+
+  /**
+   * Сводка по журналу: сколько предложено, сколько принято и сколько принято с правкой.
+   * Доля принятия = принято ÷ предложено; правки считаются принятыми, но отмечаются отдельно.
+   */
+  function logStats(days, groupBy) {
+    const since = days ? Date.now() - days * 86400000 : 0;
+    const rows = loadLog().filter((entry) => entry.ts >= since && entry.step !== undefined || entry.task !== undefined);
+    const map = new Map();
+    rows.forEach((entry) => {
+      if (entry.source === 'accepted') return;            // старый формат: отдельная запись о вставке
+      const key = String((groupBy === 'type' ? entry.type : (entry.step || entry.task)) || '—');
+      if (!map.has(key)) map.set(key, { key: key, offered: 0, accepted: 0, edited: 0, invalid: 0, rules: 0 });
+      const item = map.get(key);
+      item.offered += 1;
+      if (entry.accepted) item.accepted += 1;
+      if (entry.accepted && entry.edited) item.edited += 1;
+      if (entry.invalid) item.invalid += 1;
+      if (entry.source === 'rule') item.rules += 1;
+    });
+    return Array.from(map.values())
+      .map((item) => Object.assign(item, { share: item.offered ? item.accepted / item.offered : 0 }))
+      .sort((a, b) => b.offered - a.offered);
+  }
+
+  function clearLog() {
+    saveLog([]);
   }
 
   const AI_RULES = [
@@ -3512,11 +3575,14 @@ return {
     showAiWindow(task, { state: 'loading', prompt: prompt });
     try {
       const answer = await aiAsk(task.system, prompt, {});
+      const logId = logDecision({ task: taskId, source: 'model', offer: String(answer).slice(0, 400) });
       const parsed = task.kind === 'json' ? parseJsonLoose(answer) : answer;
       if (task.kind === 'json' && !parsed) {
-        showAiWindow(task, { state: 'text', text: answer, prompt: prompt, note: 'Модель ответила не JSON — показываю как есть' });
+        showAiWindow(task, { state: 'text', text: answer, prompt: prompt, logId: logId,
+          note: 'Модель ответила не JSON — показываю как есть' });
       } else {
-        showAiWindow(task, { state: task.kind, data: parsed, text: answer, prompt: prompt, taskId: taskId });
+        showAiWindow(task, { state: task.kind, data: parsed, text: answer, prompt: prompt, taskId: taskId,
+          logId: logId });
       }
     } catch (error) {
       showAiWindow(task, { state: 'error', text: String(error && error.message || error), prompt: prompt });
@@ -3539,8 +3605,9 @@ return {
     // Типовые случаи закрываются правилом — без запроса к модели
     const byRule = matchPlaybookRule(steps, context.chat);
     if (byRule) {
-      logDecision({ step: byRule.id, source: 'rule' });
+      const logId = logDecision({ step: byRule.id, source: 'rule', offer: String(byRule.text || '').slice(0, 400) });
       showStepWindow(byRule, {
+        logId: logId,
         source: 'по правилу «' + byRule.rule + '» — модель не спрашивали',
         why: byRule.when || '',
         wait: byRule.wait || '',
@@ -3580,8 +3647,9 @@ return {
         logDecision({ step: data && data.step || '?', source: 'model', invalid: true });
         return;
       }
-      logDecision({ step: step.id, source: 'model' });
+      const logId = logDecision({ step: step.id, source: 'model', offer: String(data.reply || step.text).slice(0, 400) });
       showStepWindow(step, {
+        logId: logId,
         source: 'выбрала модель',
         why: String(data.why || step.when || ''),
         wait: String(data.wait || step.wait || ''),
@@ -3671,7 +3739,11 @@ return {
           if (text === null) return;
           closeOverlay();
           insertTemplateText(target, text);
-          logDecision({ step: step ? step.id : '?', source: 'accepted' });
+          logUpdate(info.logId, {
+            accepted: true,
+            edited: text.trim() !== String(info.text || '').trim(),
+            final: text.slice(0, 400)
+          });
           toast('Вставлено — проверьте и отправьте сами');
         });
         foot.appendChild(paste);
@@ -3756,6 +3828,11 @@ return {
           closeOverlay();
           if (replaces) selectAllIn(target);
           insertTemplateText(target, text);
+          logUpdate(result.logId, {
+            accepted: true,
+            edited: text.trim() !== String(result.text || '').trim(),
+            final: text.slice(0, 400)
+          });
           toast(replaces ? 'Заменено — проверьте и отправьте сами' : 'Вставлено — проверьте и отправьте сами');
         });
         foot.appendChild(paste);
@@ -4226,7 +4303,8 @@ return {
     const tabCouriers = h('button', 'tab', 'Курьеры');
     const tabRules = h('button', 'tab', 'К закрытию');
     const tabArchive = h('button', 'tab', 'Архив');
-    tabs.append(tabList, tabCouriers, tabRules, tabArchive);
+    const tabAccuracy = h('button', 'tab', 'Точность');
+    tabs.append(tabList, tabCouriers, tabRules, tabArchive, tabAccuracy);
     const refresh = h('button', 'icon', '⟳');
     refresh.title = 'Перечитать список';
     head.append(tabs, refresh);
@@ -4242,7 +4320,7 @@ return {
     foot.append(count, h('span', 'spacer'), close);
     panel.appendChild(foot);
 
-    let active = ['couriers', 'rules', 'archive'].indexOf(initialTab) !== -1 ? initialTab : 'list';
+    let active = ['couriers', 'rules', 'archive', 'accuracy'].indexOf(initialTab) !== -1 ? initialTab : 'list';
     let data = { rows: [], columns: [], error: '' };
     const filters = { text: '', type: '', status: '', courier: '', onlyNotes: false };
 
@@ -4517,15 +4595,118 @@ return {
       draw();
     }
 
+    function renderAccuracy() {
+      const state = { days: 30, group: 'step' };
+      const hint = h('p', 'hint');
+      hint.innerHTML = 'Считается по журналу предложений. <b>Предложено</b> — сколько раз скрипт или модель ' +
+        'что-то предложили, <b>принято</b> — сколько из них вы вставили в поле, <b>с правкой</b> — вставили, ' +
+        'но переписав текст. <b>Доля</b> = принято ÷ предложено. Пока доля низкая — автоматике доверять рано.';
+      body.appendChild(hint);
+
+      const line = h('div', 'line');
+      const period = h('select');
+      [[7, 'за 7 дней'], [30, 'за 30 дней'], [0, 'за всё время']].forEach((pair) => {
+        const option = h('option', null, pair[1]);
+        option.value = String(pair[0]);
+        period.appendChild(option);
+      });
+      period.value = '30';
+      const group = h('select');
+      [['step', 'по шагам и задачам'], ['type', 'по типам тикетов']].forEach((pair) => {
+        const option = h('option', null, pair[1]);
+        option.value = pair[0];
+        group.appendChild(option);
+      });
+      const save = h('button', null, 'Скачать журнал');
+      save.addEventListener('click', () => {
+        try {
+          const link = document.createElement('a');
+          link.href = URL.createObjectURL(new Blob([JSON.stringify(loadLog(), null, 2)], { type: 'application/json' }));
+          link.download = 'decision-log.json';
+          document.body.appendChild(link);
+          link.click();
+          setTimeout(() => { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
+        } catch (e) { toast('Не удалось сохранить журнал'); }
+      });
+      const wipe = h('button', null, 'Очистить журнал');
+      wipe.addEventListener('click', () => {
+        if (!window.confirm('Удалить журнал решений целиком?')) return;
+        clearLog();
+        draw();
+        toast('Журнал очищен');
+      });
+      line.append(period, group, save, wipe);
+      body.appendChild(line);
+
+      const holder = h('div', 'table-holder');
+      body.appendChild(holder);
+
+      function draw() {
+        holder.textContent = '';
+        const stats = logStats(state.days, state.group);
+        const totals = stats.reduce((acc, item) => {
+          acc.offered += item.offered;
+          acc.accepted += item.accepted;
+          acc.edited += item.edited;
+          return acc;
+        }, { offered: 0, accepted: 0, edited: 0 });
+        count.textContent = 'Предложений: ' + totals.offered + ' · принято: ' + totals.accepted +
+          (totals.offered ? ' · доля: ' + Math.round((totals.accepted / totals.offered) * 100) + '%' : '');
+
+        if (!stats.length) {
+          holder.appendChild(h('div', 'side-empty',
+            'Журнал пуст. Поработайте с подсказками — точность появится сама.'));
+          return;
+        }
+
+        const table = h('table', 'grid');
+        const header = h('tr');
+        [[state.group === 'type' ? 'Тип тикета' : 'Шаг / задача', 'Чем сгруппировано'],
+         ['Предложено', 'Сколько раз предложено'],
+         ['Принято', 'Сколько раз вы вставили предложенное в поле'],
+         ['С правкой', 'Из принятых — сколько вы переписали перед вставкой'],
+         ['Доля', 'Принято ÷ предложено'],
+         ['По правилу', 'Сколько предложено правилом, без обращения к модели'],
+         ['Вне сценария', 'Сколько раз модель предложила шаг, которого нет в сценарии']].forEach((pair) => {
+          const cell = h('th', null, pair[0]);
+          cell.title = pair[1];
+          header.appendChild(cell);
+        });
+        table.appendChild(header);
+
+        stats.forEach((item) => {
+          const tr = h('tr');
+          tr.appendChild(h('td', null, item.key));
+          tr.appendChild(h('td', null, String(item.offered)));
+          tr.appendChild(h('td', null, String(item.accepted)));
+          tr.appendChild(h('td', null, String(item.edited)));
+          const share = h('td', null, item.accepted + ' из ' + item.offered + ' · ' +
+            Math.round(item.share * 100) + '%');
+          if (item.offered >= 5 && item.share < 0.5) share.className = 'bad-cell';
+          tr.appendChild(share);
+          tr.appendChild(h('td', null, String(item.rules)));
+          tr.appendChild(h('td', null, String(item.invalid)));
+          table.appendChild(tr);
+        });
+        holder.appendChild(table);
+      }
+
+      period.addEventListener('change', () => { state.days = Number(period.value); draw(); });
+      group.addEventListener('change', () => { state.group = group.value; draw(); });
+      draw();
+    }
+
     function render() {
       body.textContent = '';
       tabList.setAttribute('aria-selected', String(active === 'list'));
       tabCouriers.setAttribute('aria-selected', String(active === 'couriers'));
       tabRules.setAttribute('aria-selected', String(active === 'rules'));
       tabArchive.setAttribute('aria-selected', String(active === 'archive'));
+      tabAccuracy.setAttribute('aria-selected', String(active === 'accuracy'));
       if (active === 'list') renderList();
       else if (active === 'couriers') renderCouriers();
       else if (active === 'rules') renderRules();
+      else if (active === 'accuracy') renderAccuracy();
       else renderArchive();
     }
 
@@ -4533,6 +4714,7 @@ return {
     tabCouriers.addEventListener('click', () => { active = 'couriers'; render(); });
     tabRules.addEventListener('click', () => { active = 'rules'; render(); });
     tabArchive.addEventListener('click', () => { active = 'archive'; render(); });
+    tabAccuracy.addEventListener('click', () => { active = 'accuracy'; render(); });
     refresh.addEventListener('click', () => load(true));
 
     await load(false);
