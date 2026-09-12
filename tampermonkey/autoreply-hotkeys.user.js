@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      2.2.0
+// @version      2.3.0
 // @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам и помощник на модели.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -26,8 +26,8 @@
   const STORE_KEY = 'arh.config.v1';
   const LOG_KEY = 'arh.log.v1';
   const NOTES_KEY = 'arh.notes.v1';
+  const MEMORY_KEY = 'arh.memory.v1';
   const SEEN_KEY = 'arh.seen.v1';
-  const ARCHIVE_KEY = 'arh.archive.v1';
   const CURSOR = '{cursor}';           // маркер: куда поставить курсор после вставки
 
   // Автоответы «из коробки». Их можно полностью заменить в настройках
@@ -167,9 +167,7 @@
     notify: false
   };
 
-  // Архив, компенсации и правила «к закрытию»
-  const DEFAULT_ARCHIVE = { enabled: true, keepDays: 90 };
-
+  // Компенсации и правила «к закрытию»
   const DEFAULT_COUPON = {
     sumField: 'Сумма заказа',
     qtyField: 'Количество',
@@ -189,6 +187,17 @@
     'старше: 24'
   ].join('\n');
 
+  // Список заказов: нужен как знаменатель — сколько продано, а не сколько тикетов
+  const DEFAULT_ORDERS = {
+    url: '~/order/list/',
+    table: '*',
+    pages: 5,
+    dateColumn: 'Дата',
+    courierColumn: 'Курьер',
+    statusColumn: 'Статус',
+    packColumn: 'Фасовка'
+  };
+
   const DEFAULT_CONFIG = {
     text: DEFAULT_TEXT,
     pickerHotkey: 'Ctrl+Alt+Space',    // палитра со списком всех автоответов
@@ -200,9 +209,9 @@
     panel: DEFAULT_PANEL,              // панель со сведениями о заказе
     ai: DEFAULT_AI,                    // помощник на базе модели
     queue: DEFAULT_QUEUE,              // очередь тикетов и статистика по курьерам
-    archive: DEFAULT_ARCHIVE,          // накопленная история тикетов
     coupon: DEFAULT_COUPON,            // калькулятор компенсации
-    rules: DEFAULT_RULES               // правила «что пора сделать»
+    rules: DEFAULT_RULES,              // правила «что пора сделать»
+    orders: DEFAULT_ORDERS             // список заказов для знаменателя статистики
   };
 
   // ========================== 2. ХРАНИЛИЩЕ ==========================
@@ -1232,9 +1241,9 @@
     const side = JSON.parse(JSON.stringify(Object.assign({}, DEFAULT_PANEL, config.panel || {})));
     const ai = Object.assign({}, DEFAULT_AI, config.ai || {});
     const queue = Object.assign({}, DEFAULT_QUEUE, config.queue || {});
-    const archive = Object.assign({}, DEFAULT_ARCHIVE, config.archive || {});
     const coupon = Object.assign({}, DEFAULT_COUPON, config.coupon || {});
     const misc = { rules: config.rules == null ? DEFAULT_RULES : config.rules };
+    const orders = Object.assign({}, DEFAULT_ORDERS, config.orders || {});
     if (!Array.isArray(side.fields)) side.fields = [];
     const opts = {
       pickerHotkey: config.pickerHotkey,
@@ -1807,6 +1816,19 @@
         preview();
       };
 
+      const restore = h('button', null, 'Добавить недостающие строки из набора');
+      restore.title = 'Ваши строки останутся; добавятся только те, которых нет по названию';
+      restore.style.marginTop = '4px';
+      restore.addEventListener('click', () => {
+        const have = side.fields.map((item) => normalizeText(item.label));
+        const missing = DEFAULT_PANEL.fields.filter((item) => have.indexOf(normalizeText(item.label)) === -1);
+        if (!missing.length) { toast('Все строки из набора уже есть'); return; }
+        missing.forEach((item) => side.fields.push(JSON.parse(JSON.stringify(item))));
+        renderFields();
+        toast('Добавлено строк: ' + missing.length);
+      });
+      body.appendChild(restore);
+
       const add = h('button', 'add', '+ Добавить строку');
       add.style.marginTop = '4px';
       add.addEventListener('click', () => {
@@ -1902,6 +1924,55 @@
       checkLine.append(check, result);
       body.appendChild(checkLine);
 
+      const ordersHint = h('p', 'hint');
+      ordersHint.style.margin = '18px 0 0';
+      ordersHint.innerHTML = '<b>Список заказов.</b> Нужен как знаменатель: в списке тикетов каждая строка — ' +
+        'уже обращение, поэтому «доля» по нему всегда 100%. Доля курьера считается как тикеты ÷ проданные заказы.';
+      body.appendChild(ordersHint);
+
+      const orderText = (label, key, placeholder, cls) => {
+        const wrap = h('label', null, label);
+        wrap.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:10px;';
+        const input = h('input', cls || null);
+        input.type = 'text';
+        input.value = orders[key] == null ? '' : String(orders[key]);
+        input.placeholder = placeholder || '';
+        input.style.marginTop = '4px';
+        input.addEventListener('input', () => { orders[key] = input.value.trim(); });
+        wrap.appendChild(input);
+        return wrap;
+      };
+
+      body.appendChild(orderText('Адрес списка заказов', 'url', '~/order/list/'));
+      const orderGrid1 = h('div', 'row');
+      orderGrid1.append(orderText('Таблица', 'table', '*'), orderText('Страниц', 'pages', '5', 'num'));
+      body.appendChild(orderGrid1);
+      const orderGrid2 = h('div', 'row');
+      orderGrid2.append(orderText('Колонка даты', 'dateColumn', 'Дата'),
+                        orderText('Колонка курьера', 'courierColumn', 'Курьер'));
+      body.appendChild(orderGrid2);
+
+      const orderCheckLine = h('div', 'line');
+      orderCheckLine.style.marginTop = '10px';
+      const orderCheck = h('button', null, 'Проверить заказы');
+      const orderResult = h('span', 'pval');
+      orderCheck.addEventListener('click', async () => {
+        const saved = config.orders;
+        config.orders = Object.assign({}, orders);
+        orderResult.textContent = 'Читаю…';
+        try {
+          const data = await fetchOrders(true);
+          orderResult.textContent = data.error
+            ? data.error
+            : 'Заказов: ' + data.rows.length + ' · колонки: ' + data.columns.join(', ');
+        } finally {
+          config.orders = saved;
+          ordersCache = { ts: 0, rows: [], columns: [], error: '' };
+        }
+      });
+      orderCheckLine.append(orderCheck, orderResult);
+      body.appendChild(orderCheckLine);
+
       const rulesLabel = h('label', null, 'Правила «к закрытию»: что подсвечивать в очереди');
       rulesLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:14px;';
       const rulesArea = h('textarea', 'small');
@@ -1916,36 +1987,6 @@
       });
       rulesLabel.append(rulesArea, rulesCount);
       body.appendChild(rulesLabel);
-
-      const archiveLabel = h('label', 'check');
-      const archiveBox = h('input');
-      archiveBox.type = 'checkbox';
-      archiveBox.checked = archive.enabled !== false;
-      archiveBox.addEventListener('change', () => { archive.enabled = archiveBox.checked; });
-      archiveLabel.append(archiveBox, document.createTextNode('Копить архив просмотренных тикетов'));
-      body.appendChild(archiveLabel);
-
-      const archiveLine = h('div', 'line');
-      const keepLabel = h('label', null, 'Хранить, дней');
-      keepLabel.style.cssText = 'font-size:12px;color:#5b6273;';
-      const keepInput = h('input', 'num');
-      keepInput.type = 'text';
-      keepInput.value = String(archive.keepDays == null ? '' : archive.keepDays);
-      keepInput.style.marginTop = '4px';
-      keepInput.addEventListener('input', () => { archive.keepDays = parseNumber(keepInput.value); });
-      keepLabel.appendChild(keepInput);
-      const archiveInfo = h('span', 'pval');
-      const refreshArchiveInfo = () => { archiveInfo.textContent = 'В архиве: ' + archiveRows().length + ' тикетов'; };
-      refreshArchiveInfo();
-      const clear = h('button', null, 'Очистить архив');
-      clear.addEventListener('click', () => {
-        if (!window.confirm('Удалить весь архив тикетов?')) return;
-        saveArchive({});
-        refreshArchiveInfo();
-        toast('Архив очищен');
-      });
-      archiveLine.append(keepLabel, clear, archiveInfo);
-      body.appendChild(archiveLine);
 
       const couponHint = h('p', 'hint');
       couponHint.style.margin = '16px 0 0';
@@ -2059,6 +2100,68 @@
       bookCount.textContent = 'Шагов в сценарии: ' + parsePlaybook(ai.playbook).length;
       bookLabel.append(bookArea, bookCount);
       body.appendChild(bookLabel);
+
+      const importBox = h('div');
+      importBox.style.marginTop = '14px';
+      const importHint = h('p', 'hint');
+      importHint.innerHTML = '<b>Память старого дашборда.</b> Загрузите его выгрузку (<code>tcd_ai_memory…json</code>): ' +
+        'из разборов соберутся шаги сценария с вашими дословными текстами, похожие случаи для подсказок ' +
+        'и поправки оператора. Всё остаётся в браузере.';
+      importBox.appendChild(importHint);
+
+      const importLine = h('div', 'line');
+      const file = h('input');
+      file.type = 'file';
+      file.accept = '.json,application/json';
+      file.style.cssText = 'flex:1 1 200px;font-size:12px;';
+      const importInfo = h('span', 'pval');
+      const memory = loadMemory();
+      importInfo.textContent = memory.examples.length
+        ? 'Уже загружено: примеров ' + memory.examples.length + ', поправок ' + memory.corrections.length
+        : 'Память не загружена';
+      let parsedMemory = null;
+      const apply = h('button', null, 'Добавить в сценарий');
+      apply.disabled = true;
+
+      file.addEventListener('change', () => {
+        const chosen = file.files && file.files[0];
+        if (!chosen) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            parsedMemory = parseMemoryExport(JSON.parse(String(reader.result || '{}')));
+          } catch (e) {
+            parsedMemory = null;
+            importInfo.textContent = 'Файл не разобрался: ' + (e && e.message || e);
+            apply.disabled = true;
+            return;
+          }
+          importInfo.textContent = 'Нашлось: шагов ' + parsedMemory.steps.length +
+            ', примеров ' + parsedMemory.examples.length + ', поправок ' + parsedMemory.corrections.length;
+          apply.disabled = !parsedMemory.steps.length && !parsedMemory.examples.length;
+        };
+        reader.onerror = () => { importInfo.textContent = 'Файл не прочитался'; };
+        reader.readAsText(chosen);
+      });
+
+      apply.addEventListener('click', () => {
+        if (!parsedMemory) return;
+        const have = parsePlaybook(ai.playbook).map((step) => step.id);
+        const fresh = parsedMemory.steps.filter((step) => have.indexOf(step.id) === -1);
+        if (fresh.length) {
+          ai.playbook = String(ai.playbook || '').trim() + '\n\n' + stepsToPlaybook(fresh);
+          bookArea.value = ai.playbook;
+          bookCount.textContent = 'Шагов в сценарии: ' + parsePlaybook(ai.playbook).length;
+        }
+        saveMemory({ examples: parsedMemory.examples, corrections: parsedMemory.corrections });
+        importInfo.textContent = 'Добавлено шагов: ' + fresh.length +
+          ' · примеров сохранено: ' + parsedMemory.examples.length;
+        toast('Память загружена');
+      });
+
+      importLine.append(file, apply, importInfo);
+      importBox.appendChild(importLine);
+      body.appendChild(importBox);
 
       const chatLabel = h('label', null, 'Где переписка (пусто — берём текст страницы)');
       chatLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:12px;';
@@ -2244,13 +2347,14 @@
         panel: side,
         ai: ai,
         queue: queue,
-        archive: archive,
         coupon: coupon,
-        rules: misc.rules
+        rules: misc.rules,
+        orders: orders
       });
       hotkeyCache.clear();
       reloadTemplates();
-      queueCache = { ts: 0, rows: [], columns: [], error: '' };   // настройки списка могли поменяться
+      queueCache = { ts: 0, rows: [], columns: [], error: '' };   // настройки списков могли поменяться
+      ordersCache = { ts: 0, rows: [], columns: [], error: '' };
       const saved = saveConfig(config);
       closeOverlay();
       ensureFab();
@@ -2733,22 +2837,26 @@
     }
 
     if (field.source === 'ratio') {
-const read = (name) => {
-  const other = (allFields || []).find((item) => item !== field && item.label === name);
-  if (!other) return null;
-  const raw = String(extractField(other, allFields).value || '');
-  if (!raw || raw === '…' || raw.indexOf('⚠') === 0) return null;
-  return { num: parseNumber(raw), partial: raw.indexOf('≥') !== -1 };
-};
-const from = read(field.from);
-const to = read(field.to);
-if (!from || !to || !to.num) return { value: '' };
-const sign = (from.partial || to.partial) ? '≈ ' : '';
-// показываем и формулу, и результат; 100% не потолок — перекос должен быть виден
-return {
-  value: sign + from.num + ' из ' + to.num + ' · ' + Math.round((from.num / to.num) * 100) + '%',
-  alarm: from.num > to.num
-};
+      const byLabel = (name) => (allFields || []).filter((item) => item !== field && item.label === name)[0];
+      const missing = [field.from, field.to].filter((name) => !byLabel(name));
+      if (missing.length) return { value: '⚠ нет строки «' + missing[0] + '»' };
+
+      const read = (name) => {
+        const raw = String(extractField(byLabel(name), allFields).value || '');
+        if (!raw || raw === '…' || raw.indexOf('⚠') === 0) return null;
+        return { num: parseNumber(raw), partial: raw.indexOf('≥') !== -1 };
+      };
+      const from = read(field.from);
+      const to = read(field.to);
+      if (!from || !to) return { value: '' };
+      if (!to.num) return { value: from.num + ' из 0' };
+
+      const sign = (from.partial || to.partial) ? '≈ ' : '';
+      // показываем и формулу, и результат; 100% не потолок — перекос должен быть виден
+      return {
+        value: sign + from.num + ' из ' + to.num + ' · ' + Math.round((from.num / to.num) * 100) + '%',
+        alarm: from.num > to.num
+      };
     }
 
     if (field.source === 'count') {
@@ -3313,6 +3421,175 @@ return {
       .join('\n');
   }
 
+  // ---------- Память: примеры из вашей практики и поправки оператора ----------
+
+  const ACTION_TITLES = {
+    clarify_photos: 'Уточнить фото',
+    request_anketa: 'Анкета по ненаходу',
+    grass_mow: 'Скос травы — дневное видео',
+    camera_site: 'Камера на месте',
+    duplicate_check: 'Дубль / перепроверка',
+    escalate: 'Эскалация',
+    approve_coupon: 'Купон',
+    reject: 'Отказ',
+    payment_issue: 'Вопрос оплаты'
+  };
+
+  function loadMemory() {
+    try {
+      const raw = hasGM ? GM_getValue(MEMORY_KEY, null) : localStorage.getItem(MEMORY_KEY);
+      const parsed = typeof raw === 'string' && raw ? JSON.parse(raw) : raw;
+      if (parsed && typeof parsed === 'object') {
+        return { examples: parsed.examples || [], corrections: parsed.corrections || [] };
+      }
+    } catch (e) { /* пусто — не страшно */ }
+    return { examples: [], corrections: [] };
+  }
+
+  function saveMemory(memory) {
+    try {
+      const json = JSON.stringify({
+        examples: (memory.examples || []).slice(-400),
+        corrections: (memory.corrections || []).slice(-60)
+      });
+      if (hasGM) GM_setValue(MEMORY_KEY, json); else localStorage.setItem(MEMORY_KEY, json);
+    } catch (e) { /* переполнено — примеры не критичны */ }
+  }
+
+  /**
+   * Разбирает выгрузку памяти старого дашборда (cases + aiRules).
+   * Из разборов получаются шаги сценария с дословными текстами и примеры для подсказок,
+   * из правил — поправки оператора, которые уходят в системный промпт.
+   */
+  function parseMemoryExport(data) {
+    const cases = (data && data.cases) || [];
+    const aiRules = (data && data.aiRules) || [];
+
+    const byAction = new Map();
+    const examples = [];
+    cases.forEach((item) => {
+      const final = item.finalDecision || {};
+      const guess = item.aiDecision || {};
+      const action = String(final.action || guess.action || '').trim();
+      if (!action) return;
+
+      const input = item.inputSummary || {};
+      const weight = Number(item.operatorWeight) || 1;
+      examples.push({
+        action: action,
+        type: String(input.type || '').slice(0, 120),
+        phase: String(input.threadPhase || ''),
+        keywords: (item.keywords || []).slice(0, 6),
+        weight: item.operatorLearned ? weight + 1 : weight,
+        rejected: !!item.operatorRejected,
+        ts: Number(item.ts) || 0,
+        comment: String(item.operatorComment || '').slice(0, 200)
+      });
+
+      const text = String(final.replyText || '').trim();
+      if (!text) return;
+      const current = byAction.get(action);
+      // берём текст из самого «дорогого» разбора: где оператор поправил и подтвердил
+      if (!current || weight > current.weight || (weight === current.weight && (Number(item.ts) || 0) > current.ts)) {
+        byAction.set(action, { text: text, weight: weight, ts: Number(item.ts) || 0 });
+      }
+    });
+
+    const keywordsByAction = new Map();
+    examples.forEach((example) => {
+      if (!keywordsByAction.has(example.action)) keywordsByAction.set(example.action, new Map());
+      const counter = keywordsByAction.get(example.action);
+      example.keywords.forEach((word) => counter.set(word, (counter.get(word) || 0) + 1));
+    });
+
+    const steps = Array.from(byAction.keys()).map((action) => {
+      const counter = keywordsByAction.get(action) || new Map();
+      const top = Array.from(counter.keys())
+        .sort((a, b) => counter.get(b) - counter.get(a))
+        .slice(0, 2);
+      return {
+        id: action,
+        title: ACTION_TITLES[action] || action,
+        rule: top.join(', '),
+        when: 'из вашей практики: ' + (counter.size ? Array.from(counter.keys()).slice(0, 4).join(', ') : action),
+        wait: '',
+        text: byAction.get(action).text
+      };
+    });
+
+    const corrections = aiRules
+      .filter((rule) => (Number(rule.weight) || 0) >= 3 && rule.rule)
+      .sort((a, b) => (Number(b.weight) || 0) - (Number(a.weight) || 0))
+      .slice(0, 20)
+      .map((rule) => ({
+        text: String(rule.rule).slice(0, 200),
+        action: String(rule.correctAction || ''),
+        weight: Number(rule.weight) || 0
+      }));
+
+    return { steps: steps, examples: examples, corrections: corrections };
+  }
+
+  /** Превращает шаги в текст сценария нашего формата. */
+  function stepsToPlaybook(steps) {
+    return steps.map((step) => {
+      const head = '[' + step.id + (step.title ? ' | ' + step.title : '') + ']';
+      const lines = [head];
+      if (step.rule) lines.push('если: ' + step.rule);
+      if (step.when) lines.push('когда: ' + step.when);
+      if (step.wait) lines.push('ждём: ' + step.wait);
+      lines.push(step.text);
+      return lines.join('\n');
+    }).join('\n\n');
+  }
+
+  /** Примеры, похожие на текущий тикет: по типу обращения и по словам из переписки. */
+  function pickExamples(context, limit) {
+    const memory = loadMemory();
+    if (!memory.examples.length) return [];
+    const haystack = normalizeText(context.chat + ' ' + context.facts.map((fact) => fact.value).join(' '));
+    const type = normalizeText(context.facts
+      .filter((fact) => /тип/i.test(fact.label))
+      .map((fact) => fact.value)[0] || '');
+
+    return memory.examples
+      .filter((example) => !example.rejected)
+      .map((example) => {
+        let score = 0;
+        if (type && example.type && normalizeText(example.type).indexOf(type.slice(0, 24)) !== -1) score += 3;
+        (example.keywords || []).forEach((word) => {
+          if (word && haystack.indexOf(normalizeText(word)) !== -1) score += 2;
+        });
+        score += Math.min(3, Number(example.weight) || 0) / 2;
+        return { example: example, score: score };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score || b.example.ts - a.example.ts)
+      .slice(0, limit || 6)
+      .map((item) => item.example);
+  }
+
+  function examplesBlock(context) {
+    const examples = pickExamples(context, 6);
+    if (!examples.length) return '';
+    const lines = examples.map((example) => {
+      const parts = [];
+      if (example.type) parts.push(example.type);
+      if (example.phase) parts.push('фаза ' + example.phase);
+      if (example.keywords && example.keywords.length) parts.push(example.keywords.join(', '));
+      return '- ' + (parts.join(' · ') || 'похожий случай') + ' → ' + example.action +
+        (example.comment ? ' (оператор: ' + example.comment + ')' : '');
+    });
+    return 'ПОХОЖИЕ СЛУЧАИ ИЗ ВАШЕЙ ПРАКТИКИ (что выбирали раньше):\n' + lines.join('\n');
+  }
+
+  function correctionsBlock() {
+    const memory = loadMemory();
+    if (!memory.corrections.length) return '';
+    const lines = memory.corrections.slice(0, 6).map((item) => '- ' + item.text);
+    return 'ПОПРАВКИ ОПЕРАТОРА (их нарушать нельзя):\n' + lines.join('\n');
+  }
+
   // ---------- Сценарий разбирательства ----------
 
   /**
@@ -3621,14 +3898,19 @@ return {
     const prompt = [
       'ЗАДАЧА: выбери следующий шаг разбирательства и напиши текст сообщения покупателю.',
       'Выбирать можно ТОЛЬКО из списка шагов ниже, поле step — это id из списка.',
+      'Текст шага меняй минимально: он согласован с оператором.',
       'Формат ответа: {"step":"id","why":"почему именно этот шаг","reply":"текст покупателю","wait":"чего ждём дальше"}',
       '',
       'ШАГИ:', list,
       '',
+      correctionsBlock(),
+      '',
+      examplesBlock(context),
+      '',
       'ДАННЫЕ:', factsBlock(context),
       '',
       'ПЕРЕПИСКА:', context.chat
-    ].join('\n');
+    ].filter((part) => part !== '').join('\n');
     const system = AI_RULES + ' Верни только JSON с полями step, why, reply, wait.';
 
     aiBusy = true;
@@ -4088,124 +4370,174 @@ return {
     }
 
     queueCache = { ts: Date.now(), rows: rows, columns: columns, error: error };
-    mergeArchive(rows, columns);
     return queueCache;
+  }
+
+  // ---------- Второй источник: список заказов (выкладок) ----------
+
+  function ordersConfig() {
+    return Object.assign({}, DEFAULT_ORDERS, config.orders || {});
+  }
+
+  let ordersCache = { ts: 0, rows: [], columns: [], error: '' };
+
+  /** Читает список заказов тем же способом, что и очередь тикетов. */
+  async function fetchOrders(force) {
+    const conf = ordersConfig();
+    if (!conf.url) {
+      ordersCache = { ts: Date.now(), rows: [], columns: [], error: 'Список заказов не настроен' };
+      return ordersCache;
+    }
+    if (!force && Date.now() - ordersCache.ts < 60000 && ordersCache.rows.length) return ordersCache;
+
+    const first = expandUrl(conf.url, location.href);
+    if (!first || new URL(first).origin !== location.origin) {
+      ordersCache = { ts: Date.now(), rows: [], columns: [], error: 'Список заказов на другом сайте' };
+      return ordersCache;
+    }
+
+    const pages = Math.max(1, Math.min(20, Math.round(Number(conf.pages) || 1)));
+    const rows = [];
+    let columns = [];
+    let url = first;
+    let error = '';
+    for (let page = 0; page < pages && url; page++) {
+      let doc = null;
+      try {
+        const response = await fetch(url, { credentials: 'include' });
+        if (!response.ok) { error = 'Заказы не открылись: HTTP ' + response.status; break; }
+        doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+        doc.arhUrl = url;
+      } catch (e) {
+        error = 'Заказы не открылись: ' + (e && e.message || e);
+        break;
+      }
+      const parsed = readQueueTable(doc, conf);
+      if (!parsed) { if (!rows.length) error = 'На странице заказов не нашлась таблица'; break; }
+      if (!columns.length) columns = parsed.columns;
+      parsed.rows.forEach((row) => {
+        if (!rows.some((existing) => existing.key === row.key)) rows.push(row);
+      });
+      const next = findNextPage(doc);
+      url = next && new URL(next).origin === location.origin ? next : '';
+    }
+
+    ordersCache = { ts: Date.now(), rows: rows, columns: columns, error: error };
+    return ordersCache;
+  }
+
+  // ---------- Периоды ----------
+
+  const PERIODS = [['1', 'за сегодня'], ['7', 'за неделю'], ['30', 'за месяц'], ['0', 'за всё время']];
+
+  function periodStart(days) {
+    const count = Number(days) || 0;
+    if (!count) return 0;
+    const from = new Date();
+    from.setHours(0, 0, 0, 0);
+    from.setDate(from.getDate() - (count - 1));           // «за сегодня» — это сегодняшний день целиком
+    return from.getTime();
+  }
+
+  function inPeriod(row, dateColumn, since) {
+    if (!since) return true;
+    const date = parseDate(row.values[dateColumn] || '');
+    return date ? date.getTime() >= since : false;
+  }
+
+  function dayKey(date) {
+    const pad = (value) => (value < 10 ? '0' : '') + value;
+    return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate());
+  }
+
+  function dayTitle(key) {
+    const parts = String(key).split('-');
+    const date = new Date(+parts[0], +parts[1] - 1, +parts[2]);
+    return date.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
   }
 
   // ---------- Статистика по курьерам ----------
 
   /**
-   * Сводка по курьерам. Каждое число — простая и проверяемая величина:
-   * всего строк у курьера, сколько из них по отмеченным фасовкам, и их доля.
+   * Сводка по курьерам за период. Тикеты и заказы считаются по своим спискам,
+   * доля = тикеты ÷ заказы: сколько выкладок этого курьера закончилось обращением.
    */
-  function courierStats(rows, conf) {
+  function courierStats(ticketRows, orderRows, conf, days) {
+    const since = periodStart(days);
     const packs = (panelConfig().packs || {}).counted || [];
     const counted = packs.map(normalizeText);
-    const courierCol = conf.courierColumn;
-    const packCol = conf.packColumn;
+    const orderConf = ordersConfig();
     const map = new Map();
 
-    rows.forEach((row) => {
-      const courier = String(row.values[courierCol] || '').trim() || '— без курьера —';
-      if (!map.has(courier)) map.set(courier, { courier: courier, total: 0, flagged: 0, last: '' });
-      const item = map.get(courier);
-      item.total += 1;
-      const packText = normalizeText(packCol ? row.values[packCol] : '') ||
+    const item = (name) => {
+      const courier = String(name || '').trim() || '— без курьера —';
+      if (!map.has(courier)) {
+        map.set(courier, { courier: courier, tickets: 0, orders: 0, flagged: 0, last: '', lastTs: 0 });
+      }
+      return map.get(courier);
+    };
+
+    ticketRows.forEach((row) => {
+      if (!inPeriod(row, conf.dateColumn, since)) return;
+      const entry = item(row.values[conf.courierColumn]);
+      entry.tickets += 1;
+      const packText = normalizeText(conf.packColumn ? row.values[conf.packColumn] : '') ||
         normalizeText(Object.keys(row.values).map((key) => row.values[key]).join(' '));
-      if (counted.length && counted.some((value) => packText.indexOf(value) !== -1)) item.flagged += 1;
-      const date = row.values[conf.dateColumn] || '';
-      if (date && (!item.last || (parseDate(date) || 0) > (parseDate(item.last) || 0))) item.last = date;
+      if (counted.length && counted.some((value) => packText.indexOf(value) !== -1)) entry.flagged += 1;
+      const date = parseDate(row.values[conf.dateColumn] || '');
+      if (date && date.getTime() > entry.lastTs) {
+        entry.lastTs = date.getTime();
+        entry.last = row.values[conf.dateColumn];
+      }
+    });
+
+    (orderRows || []).forEach((row) => {
+      if (!inPeriod(row, orderConf.dateColumn, since)) return;
+      item(row.values[orderConf.courierColumn]).orders += 1;
     });
 
     return Array.from(map.values())
-      .map((item) => Object.assign(item, { share: item.total ? item.flagged / item.total : 0 }))
-      .sort((a, b) => (b.flagged - a.flagged) || (b.total - a.total));
-  }
-
-  // ---------- Архив: копим то, что сайт со временем перестаёт показывать ----------
-
-  function archiveConfig() {
-    return Object.assign({}, DEFAULT_ARCHIVE, config.archive || {});
-  }
-
-  function loadArchive() {
-    try {
-      const raw = hasGM ? GM_getValue(ARCHIVE_KEY, null) : localStorage.getItem(ARCHIVE_KEY);
-      const parsed = typeof raw === 'string' && raw ? JSON.parse(raw) : raw;
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch (e) { return {}; }
-  }
-
-  function saveArchive(archive) {
-    try {
-      const json = JSON.stringify(archive);
-      if (hasGM) GM_setValue(ARCHIVE_KEY, json); else localStorage.setItem(ARCHIVE_KEY, json);
-    } catch (e) { /* хранилище переполнено — архив не критичен */ }
-  }
-
-  /** Дописывает строки очереди в архив и подчищает старое. */
-  function mergeArchive(rows, columns) {
-    const conf = archiveConfig();
-    if (!conf.enabled || !rows.length) return;
-    const archive = loadArchive();
-    const now = Date.now();
-    rows.forEach((row) => {
-      const existing = archive[row.key];
-      archive[row.key] = {
-        values: row.values,
-        href: row.href,
-        columns: columns,
-        firstSeen: existing && existing.firstSeen ? existing.firstSeen : now,
-        lastSeen: now
-      };
-    });
-    const keepMs = Math.max(1, Number(conf.keepDays) || 90) * 86400000;
-    Object.keys(archive).forEach((key) => {
-      if (now - (archive[key].lastSeen || 0) > keepMs) delete archive[key];
-    });
-    saveArchive(archive);
-  }
-
-  function archiveRows() {
-    const archive = loadArchive();
-    return Object.keys(archive).map((key) => Object.assign({ key: key }, archive[key]))
-      .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
-  }
-
-  function exportArchive(kind) {
-    const rows = archiveRows();
-    if (!rows.length) { toast('Архив пуст'); return; }
-    const columns = (rows[0].columns || []).slice();
-    let text = '';
-    let mime = 'application/json';
-    let name = 'tickets-archive.json';
-
-    if (kind === 'csv') {
-      const escape = (value) => '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"';
-      const header = columns.concat(['Впервые', 'Последний раз', 'Ссылка']);
-      const lines = [header.map(escape).join(';')];
-      rows.forEach((row) => {
-        const cells = columns.map((column) => escape(row.values[column] || ''));
-        cells.push(escape(new Date(row.firstSeen).toLocaleString()));
-        cells.push(escape(new Date(row.lastSeen).toLocaleString()));
-        cells.push(escape(row.href || ''));
-        lines.push(cells.join(';'));
+      .map((entry) => Object.assign(entry, {
+        share: entry.orders ? entry.tickets / entry.orders : null
+      }))
+      .sort((a, b) => {
+        if (a.share == null && b.share == null) return b.tickets - a.tickets;
+        if (a.share == null) return 1;
+        if (b.share == null) return -1;
+        return b.share - a.share || b.tickets - a.tickets;
       });
-      text = '﻿' + lines.join('\n');                 // BOM — чтобы Excel не ломал кириллицу
-      mime = 'text/csv';
-      name = 'tickets-archive.csv';
-    } else {
-      text = JSON.stringify(rows, null, 2);
-    }
+  }
 
-    try {
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(new Blob([text], { type: mime }));
-      link.download = name;
-      document.body.appendChild(link);
-      link.click();
-      setTimeout(() => { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
-    } catch (e) { toast('Не удалось сохранить файл'); }
+  /** Разбивка по дням для карточки курьера: продано и сколько из этого обернулось тикетом. */
+  function courierDays(courier, ticketRows, orderRows, conf, days) {
+    const since = periodStart(days);
+    const orderConf = ordersConfig();
+    const map = new Map();
+    const sameCourier = (value) => String(value || '').trim() === courier ||
+      (!String(value || '').trim() && courier === '— без курьера —');
+
+    const bucket = (key) => {
+      if (!map.has(key)) map.set(key, { key: key, orders: 0, tickets: 0 });
+      return map.get(key);
+    };
+
+    (orderRows || []).forEach((row) => {
+      if (!sameCourier(row.values[orderConf.courierColumn])) return;
+      if (!inPeriod(row, orderConf.dateColumn, since)) return;
+      const date = parseDate(row.values[orderConf.dateColumn] || '');
+      if (date) bucket(dayKey(date)).orders += 1;
+    });
+
+    ticketRows.forEach((row) => {
+      if (!sameCourier(row.values[conf.courierColumn])) return;
+      if (!inPeriod(row, conf.dateColumn, since)) return;
+      const date = parseDate(row.values[conf.dateColumn] || '');
+      if (date) bucket(dayKey(date)).tickets += 1;
+    });
+
+    return Array.from(map.values())
+      .map((day) => Object.assign(day, { share: day.orders ? day.tickets / day.orders : null }))
+      .sort((a, b) => (a.key < b.key ? 1 : -1));
   }
 
   // ---------- Правила «к закрытию» ----------
@@ -4286,6 +4618,135 @@ return {
     return options;
   }
 
+  // ---------- Карточка курьера ----------
+
+  let queuePeriod = 7;                                    // общий период для статистики курьеров
+
+  function openCourierCard(courier, data, orders, conf, days) {
+    const overlay = createOverlay();
+    const panel = h('div', 'panel');
+    panel.style.width = 'min(820px, 100%)';
+    overlay.appendChild(panel);
+
+    const head = h('div', 'head');
+    head.append(h('h2', null, '👤 ' + courier), h('span', 'spacer'));
+    panel.appendChild(head);
+
+    const body = h('div', 'body');
+    panel.appendChild(body);
+    const foot = h('div', 'foot');
+    const count = h('span', 'hint');
+    count.style.margin = '0';
+    const back = h('button', null, 'Назад к курьерам');
+    back.addEventListener('click', () => openQueue('couriers'));
+    const close = h('button', null, 'Закрыть');
+    close.addEventListener('click', closeOverlay);
+    foot.append(count, h('span', 'spacer'), back, close);
+    panel.appendChild(foot);
+
+    let period = days;
+
+    const draw = () => {
+      body.textContent = '';
+      const hint = h('p', 'hint');
+      hint.innerHTML = 'По дням выкладок: <b>продано</b> — строк списка заказов за этот день, ' +
+        '<b>тикетов</b> — обращений за тот же день, <b>доля</b> = тикеты ÷ продано.';
+      body.appendChild(hint);
+
+      const line = h('div', 'line');
+      const select = h('select');
+      PERIODS.forEach((pair) => {
+        const option = h('option', null, pair[1]);
+        option.value = pair[0];
+        select.appendChild(option);
+      });
+      select.value = String(period);
+      select.addEventListener('change', () => { period = Number(select.value); draw(); });
+      line.appendChild(select);
+      body.appendChild(line);
+
+      const daysRows = courierDays(courier, data.rows, orders.rows, conf, period);
+      const totals = daysRows.reduce((acc, day) => {
+        acc.orders += day.orders;
+        acc.tickets += day.tickets;
+        return acc;
+      }, { orders: 0, tickets: 0 });
+      count.textContent = 'Продано: ' + totals.orders + ' · тикетов: ' + totals.tickets +
+        (totals.orders ? ' · доля: ' + Math.round((totals.tickets / totals.orders) * 100) + '%' : '');
+
+      if (!daysRows.length) {
+        body.appendChild(h('div', 'side-empty', orders.error
+          ? 'Заказы не читаются: ' + orders.error
+          : 'За этот период у курьера ничего нет'));
+        return;
+      }
+
+      const holder = h('div', 'table-holder');
+      const table = h('table', 'grid');
+      const header = h('tr');
+      [['День', 'День выкладки'],
+       ['Продано', 'Строк списка заказов за этот день'],
+       ['Тикетов', 'Обращений за тот же день'],
+       ['Доля', 'Тикеты ÷ продано']].forEach((pair) => {
+        const cell = h('th', null, pair[0]);
+        cell.title = pair[1];
+        header.appendChild(cell);
+      });
+      table.appendChild(header);
+
+      daysRows.forEach((day) => {
+        const tr = h('tr');
+        tr.appendChild(h('td', null, dayTitle(day.key)));
+        tr.appendChild(h('td', null, String(day.orders)));
+        tr.appendChild(h('td', null, String(day.tickets)));
+        const share = h('td', null, day.share == null
+          ? (day.tickets ? 'тикеты без заказов' : '—')
+          : day.tickets + ' из ' + day.orders + ' · ' + Math.round(day.share * 100) + '%');
+        if (day.share != null && day.share >= 0.2) share.className = 'bad-cell';
+        tr.appendChild(share);
+        table.appendChild(tr);
+      });
+      holder.appendChild(table);
+      body.appendChild(holder);
+
+      // сами тикеты этого курьера — чтобы из карточки сразу провалиться в обращение
+      const since = periodStart(period);
+      const tickets = data.rows.filter((row) =>
+        String(row.values[conf.courierColumn] || '').trim() === courier && inPeriod(row, conf.dateColumn, since));
+      if (!tickets.length) return;
+
+      const title = h('p', 'hint');
+      title.style.margin = '14px 0 6px';
+      title.textContent = 'Тикеты за период: ' + tickets.length;
+      body.appendChild(title);
+
+      const list = h('div', 'table-holder');
+      list.style.maxHeight = '26vh';
+      const ticketTable = h('table', 'grid');
+      const ticketHeader = h('tr');
+      [data.columns[0] || 'Номер', conf.dateColumn, conf.typeColumn, conf.packColumn].forEach((column) => {
+        ticketHeader.appendChild(h('th', null, column || ''));
+      });
+      ticketTable.appendChild(ticketHeader);
+      tickets.forEach((row) => {
+        const tr = h('tr');
+        [data.columns[0], conf.dateColumn, conf.typeColumn, conf.packColumn].forEach((column) => {
+          tr.appendChild(h('td', null, (column && row.values[column]) || ''));
+        });
+        if (row.href) {
+          tr.style.cursor = 'pointer';
+          tr.title = 'Открыть тикет';
+          tr.addEventListener('click', () => window.open(row.href, '_blank'));
+        }
+        ticketTable.appendChild(tr);
+      });
+      list.appendChild(ticketTable);
+      body.appendChild(list);
+    };
+
+    draw();
+  }
+
   // ---------- Окно очереди ----------
 
   let queueSort = { column: '', dir: 1 };
@@ -4302,9 +4763,8 @@ return {
     const tabList = h('button', 'tab', 'Очередь');
     const tabCouriers = h('button', 'tab', 'Курьеры');
     const tabRules = h('button', 'tab', 'К закрытию');
-    const tabArchive = h('button', 'tab', 'Архив');
     const tabAccuracy = h('button', 'tab', 'Точность');
-    tabs.append(tabList, tabCouriers, tabRules, tabArchive, tabAccuracy);
+    tabs.append(tabList, tabCouriers, tabRules, tabAccuracy);
     const refresh = h('button', 'icon', '⟳');
     refresh.title = 'Перечитать список';
     head.append(tabs, refresh);
@@ -4320,14 +4780,16 @@ return {
     foot.append(count, h('span', 'spacer'), close);
     panel.appendChild(foot);
 
-    let active = ['couriers', 'rules', 'archive', 'accuracy'].indexOf(initialTab) !== -1 ? initialTab : 'list';
+    let active = ['couriers', 'rules', 'accuracy'].indexOf(initialTab) !== -1 ? initialTab : 'list';
     let data = { rows: [], columns: [], error: '' };
+    let orders = { rows: [], columns: [], error: '' };
     const filters = { text: '', type: '', status: '', courier: '', onlyNotes: false };
 
     const load = async (force) => {
       body.textContent = '';
       body.appendChild(h('div', 'side-empty', 'Читаю список тикетов…'));
       data = await fetchQueue(force);
+      orders = await fetchOrders(force);
       render();
     };
 
@@ -4449,27 +4911,48 @@ return {
     }
 
     function renderCouriers() {
-      const stats = courierStats(data.rows, conf);
-      count.textContent = 'Курьеров: ' + stats.length + ' · строк в списке: ' + data.rows.length;
+      const hint = h('p', 'hint');
+      hint.innerHTML = 'Тикеты — из списка тикетов, <b>заказы</b> — из списка заказов (настраивается на вкладке ' +
+        '«Очередь»). <b>Доля</b> = тикеты ÷ заказы: сколько выкладок обернулось обращением. ' +
+        'Клик по строке открывает карточку курьера по дням.';
+      body.appendChild(hint);
+
+      const line = h('div', 'line');
+      const period = h('select');
+      PERIODS.forEach((pair) => {
+        const option = h('option', null, pair[1]);
+        option.value = pair[0];
+        period.appendChild(option);
+      });
+      period.value = String(queuePeriod);
+      period.addEventListener('change', () => { queuePeriod = Number(period.value); render(); });
+      line.appendChild(period);
+      const note = h('span', 'pval');
+      line.appendChild(note);
+      body.appendChild(line);
+
+      const holder = h('div', 'table-holder');
+      body.appendChild(holder);
+
+      const stats = courierStats(data.rows, orders.rows, conf, queuePeriod);
+      note.textContent = orders.error
+        ? 'Заказы: ' + orders.error + ' — доля не считается'
+        : 'Заказов в списке: ' + orders.rows.length;
+      count.textContent = 'Курьеров: ' + stats.length + ' · тикетов: ' + data.rows.length;
+
       if (!stats.length) {
-        body.appendChild(h('div', 'side-empty', data.error || 'Нет данных: проверьте колонку курьера в настройках'));
+        holder.appendChild(h('div', 'side-empty', data.error || 'За этот период ничего нет'));
         return;
       }
 
-      const hint = h('p', 'hint');
-      hint.innerHTML = 'Все числа — из того же списка тикетов. <b>Тикетов</b> — строк у курьера, ' +
-        '<b>проблемных</b> — из них по отмеченным фасовкам, <b>доля</b> — проблемные ÷ тикетов. ' +
-        'Если фасовки не отмечены, проблемных не будет: отметьте их на вкладке «Панель».';
-      body.appendChild(hint);
-
-      const holder = h('div', 'table-holder');
       const table = h('table', 'grid');
       const header = h('tr');
       [['Курьер', 'Значение колонки «' + conf.courierColumn + '»'],
-       ['Тикетов', 'Сколько строк списка у этого курьера'],
-       ['Проблемных', 'Из них строк с отмеченной фасовкой'],
-       ['Доля', 'Проблемные ÷ тикетов'],
-       ['Последний', 'Самая свежая дата из колонки «' + conf.dateColumn + '»']].forEach((pair) => {
+       ['Заказов', 'Строк списка заказов за период'],
+       ['Тикетов', 'Строк списка тикетов за период'],
+       ['Доля', 'Тикеты ÷ заказы'],
+       ['Проблемных', 'Тикеты по отмеченным фасовкам'],
+       ['Последний тикет', 'Самая свежая дата тикета']].forEach((pair) => {
         const cell = h('th', null, pair[0]);
         cell.title = pair[1];
         header.appendChild(cell);
@@ -4478,17 +4961,22 @@ return {
 
       stats.forEach((item) => {
         const tr = h('tr');
+        tr.style.cursor = 'pointer';
+        tr.title = 'Открыть карточку курьера';
+        tr.addEventListener('click', () => openCourierCard(item.courier, data, orders, conf, queuePeriod));
         tr.appendChild(h('td', null, item.courier));
-        tr.appendChild(h('td', null, String(item.total)));
-        tr.appendChild(h('td', null, String(item.flagged)));
-        const share = h('td', null, item.flagged + ' из ' + item.total + ' · ' + Math.round(item.share * 100) + '%');
-        if (item.flagged && item.share >= 0.3) share.className = 'bad-cell';
+        tr.appendChild(h('td', null, item.orders ? String(item.orders) : '—'));
+        tr.appendChild(h('td', null, String(item.tickets)));
+        const share = h('td', null, item.share == null
+          ? 'нет заказов'
+          : item.tickets + ' из ' + item.orders + ' · ' + Math.round(item.share * 100) + '%');
+        if (item.share != null && item.share >= 0.2) share.className = 'bad-cell';
         tr.appendChild(share);
+        tr.appendChild(h('td', null, String(item.flagged)));
         tr.appendChild(h('td', null, item.last || '—'));
         table.appendChild(tr);
       });
       holder.appendChild(table);
-      body.appendChild(holder);
     }
 
     function renderRules() {
@@ -4540,59 +5028,6 @@ return {
         holder.appendChild(table);
         body.appendChild(holder);
       });
-    }
-
-    function renderArchive() {
-      const rows = archiveRows();
-      count.textContent = 'В архиве: ' + rows.length + ' тикетов';
-      const hint = h('p', 'hint');
-      hint.textContent = 'Сюда складывается всё, что скрипт видел в списке, — даже если сайт это уже не показывает.';
-      body.appendChild(hint);
-
-      const line = h('div', 'line');
-      const search = h('input');
-      search.type = 'text';
-      search.placeholder = 'Поиск по архиву…';
-      const csv = h('button', null, 'Скачать CSV');
-      csv.addEventListener('click', () => exportArchive('csv'));
-      const json = h('button', null, 'Скачать JSON');
-      json.addEventListener('click', () => exportArchive('json'));
-      line.append(search, csv, json);
-      body.appendChild(line);
-
-      const holder = h('div', 'table-holder');
-      body.appendChild(holder);
-
-      const draw = () => {
-        holder.textContent = '';
-        const needle = normalizeText(search.value);
-        const shown = rows.filter((row) => !needle ||
-          normalizeText(Object.keys(row.values).map((key) => row.values[key]).join(' ')).indexOf(needle) !== -1);
-        count.textContent = 'В архиве: ' + rows.length + ' · показано: ' + shown.length;
-        if (!shown.length) {
-          holder.appendChild(h('div', 'side-empty', rows.length ? 'Ничего не найдено' : 'Архив пока пуст'));
-          return;
-        }
-        const columns = shown[0].columns || data.columns;
-        const table = h('table', 'grid');
-        const header = h('tr');
-        columns.concat(['Впервые', 'Последний раз']).forEach((column) => header.appendChild(h('th', null, column)));
-        table.appendChild(header);
-        shown.slice(0, 300).forEach((row) => {
-          const tr = h('tr');
-          columns.forEach((column) => tr.appendChild(h('td', null, row.values[column] || '')));
-          tr.appendChild(h('td', null, new Date(row.firstSeen).toLocaleDateString()));
-          tr.appendChild(h('td', null, new Date(row.lastSeen).toLocaleDateString()));
-          if (row.href) {
-            tr.style.cursor = 'pointer';
-            tr.addEventListener('click', () => window.open(row.href, '_blank'));
-          }
-          table.appendChild(tr);
-        });
-        holder.appendChild(table);
-      };
-      search.addEventListener('input', draw);
-      draw();
     }
 
     function renderAccuracy() {
@@ -4701,19 +5136,16 @@ return {
       tabList.setAttribute('aria-selected', String(active === 'list'));
       tabCouriers.setAttribute('aria-selected', String(active === 'couriers'));
       tabRules.setAttribute('aria-selected', String(active === 'rules'));
-      tabArchive.setAttribute('aria-selected', String(active === 'archive'));
       tabAccuracy.setAttribute('aria-selected', String(active === 'accuracy'));
       if (active === 'list') renderList();
       else if (active === 'couriers') renderCouriers();
       else if (active === 'rules') renderRules();
-      else if (active === 'accuracy') renderAccuracy();
-      else renderArchive();
+      else renderAccuracy();
     }
 
     tabList.addEventListener('click', () => { active = 'list'; render(); });
     tabCouriers.addEventListener('click', () => { active = 'couriers'; render(); });
     tabRules.addEventListener('click', () => { active = 'rules'; render(); });
-    tabArchive.addEventListener('click', () => { active = 'archive'; render(); });
     tabAccuracy.addEventListener('click', () => { active = 'accuracy'; render(); });
     refresh.addEventListener('click', () => load(true));
 
