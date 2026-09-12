@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      2.5.0
+// @version      2.6.0
 // @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам, помощник на модели и автоподстановка проверенных шагов.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -250,7 +250,31 @@
     } else if (raw && typeof raw === 'object') {
       parsed = raw;
     }
-    return Object.assign({}, DEFAULT_CONFIG, parsed || {});
+    return migrateConfig(Object.assign({}, DEFAULT_CONFIG, parsed || {}));
+  }
+
+  /**
+   * Достройка настроек, сохранённых прежними версиями. Поля панели пользователь правит
+   * сам, поэтому ничего не переписываем и не переставляем — только добавляем строку,
+   * которой в старой версии ещё не было. Отметка в migrations не даёт добавить дважды:
+   * если строку удалили осознанно, она больше не вернётся.
+   */
+  function migrateConfig(cfg) {
+    const done = Array.isArray(cfg.migrations) ? cfg.migrations.slice() : [];
+    const fields = cfg.panel && Array.isArray(cfg.panel.fields) ? cfg.panel.fields : null;
+
+    if (done.indexOf('ratio1') === -1) {
+      done.push('ratio1');
+      if (fields && fields.length) {
+        const sample = DEFAULT_PANEL.fields.filter((field) => field.source === 'ratio')[0];
+        const has = (label) => fields.some((field) => field && field.label === label);
+        const hasRatio = fields.some((field) => field && field.source === 'ratio');
+        if (sample && !hasRatio && has(sample.from) && has(sample.to)) fields.push(Object.assign({}, sample));
+      }
+    }
+
+    cfg.migrations = done;
+    return cfg;
   }
 
   function saveConfig(cfg) {
@@ -1033,6 +1057,7 @@
     '.side-alarm { background: #fdeaea; }',
     '.side-alarm .side-value { color: #b3261e; }',
     '.side-empty { padding: 10px 6px; color: #5b6273; }',
+    '.side-note { padding: 7px 12px; font-size: 11px; color: #5b6273; background: #eef1f7; }',
     '.pick-box { position: fixed; pointer-events: none; border: 2px solid #2f6df6; border-radius: 4px;',
     '  background: rgba(47, 109, 246, .12); }',
     '.pick-bar { position: fixed; left: 50%; top: 14px; transform: translateX(-50%); padding: 8px 14px;',
@@ -1062,6 +1087,7 @@
     '  .side-head, .ai-row { border-color: #313745; }',
     '  .side-row:hover { background: #262c38; }',
     '  .side-label, .side-empty { color: #a3abbd; }',
+    '  .side-note { background: #262c38; color: #a3abbd; }',
     '  .side-dim { color: #6f7891; }',
     '  .side-alarm { background: rgba(122, 48, 48, .4); }',
     '  .side-alarm .side-value { color: #ff9a90; }',
@@ -2238,7 +2264,7 @@
       importBox.appendChild(importLine);
       body.appendChild(importBox);
 
-      const chatLabel = h('label', null, 'Где переписка (пусто — берём текст страницы)');
+      const chatLabel = h('label', null, 'Где переписка (пусто — блок диалога ищется сам)');
       chatLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:12px;';
       const chatLine = h('div', 'line');
       const chatInput = h('input');
@@ -2252,9 +2278,28 @@
         ai.chatSelector = shortSelector(el);
         chatInput.value = ai.chatSelector;
       }));
-      chatLine.append(chatInput, chatPick);
+      const chatTest = h('button', null, 'Проверить');
+      chatLine.append(chatInput, chatPick, chatTest);
       chatLabel.appendChild(chatLine);
+      const chatInfo = h('div', 'pval');
+      chatInfo.style.marginTop = '6px';
+      chatLabel.appendChild(chatInfo);
       body.appendChild(chatLabel);
+
+      // видно, что именно уедет в модель под заголовком «ПЕРЕПИСКА»
+      const showChat = () => {
+        const saved = config.ai;
+        config.ai = Object.assign({}, ai);
+        let source = { from: '—', text: '' };
+        try { source = chatSource(); } finally { config.ai = saved; }
+        const lines = String(source.text || '').split('\n').filter(Boolean);
+        chatInfo.textContent = source.text
+          ? 'Взято ' + source.from + ': строк ' + lines.length + ', символов ' + source.text.length +
+            '. Начало: ' + lines.slice(0, 2).join(' / ').slice(0, 120)
+          : 'На этой странице переписки не нашлось';
+      };
+      chatTest.addEventListener('click', showChat);
+      showChat();
 
       const limits = h('div', 'row');
       const ctxLabel = h('label', null, 'Сколько символов страницы отдавать');
@@ -3191,6 +3236,74 @@
     root.appendChild(side);
   }
 
+  /**
+   * Сводка по списку, который открыт прямо сейчас на странице.
+   * На странице тикетов полям заказа взяться неоткуда, и вместо «данных нет»
+   * панель показывает то, ради чего в список и заходят.
+   */
+  function onQueueListPage() {
+    const url = expandUrl(queueConfig().url || '', location.href);
+    if (!url) return false;
+    try {
+      const wanted = new URL(url, location.href).pathname.replace(/\/+$/, '');
+      return !!wanted && location.pathname.replace(/\/+$/, '') === wanted;
+    } catch (e) { return false; }
+  }
+
+  function pageListSummary() {
+    if (!onQueueListPage()) return null;
+    const parsed = readQueueTable(document, queueConfig());
+    if (!parsed || parsed.rows.length < 2) return null;
+    const conf = resolveColumns(queueConfig(), parsed.columns).conf;
+
+    const packs = panelConfig().packs || {};
+    const counted = (packs.counted || []).map(normalizeText);
+    const closed = /закр|выполн|решен|отклон/i;
+    const now = Date.now();
+    const stat = { total: parsed.rows.length, open: 0, old: 0, flagged: 0, dated: 0 };
+    const couriers = new Map();
+    const types = new Map();
+    const bump = (map, key) => { if (key) map.set(key, (map.get(key) || 0) + 1); };
+
+    parsed.rows.forEach((row) => {
+      const status = row.values[conf.statusColumn] || '';
+      const isOpen = !status || !closed.test(status);
+      if (isOpen) stat.open += 1;
+
+      const date = parseDate(row.values[conf.dateColumn] || '');
+      if (date) {
+        stat.dated += 1;
+        if (isOpen && now - date.getTime() > 86400000) stat.old += 1;
+      }
+
+      const pack = normalizeText(row.values[conf.packColumn] || '');
+      const text = pack || normalizeText(Object.keys(row.values).map((key) => row.values[key]).join(' '));
+      if (counted.length && counted.some((value) => text.indexOf(value) !== -1)) stat.flagged += 1;
+
+      bump(couriers, row.values[conf.courierColumn]);
+      bump(types, row.values[conf.typeColumn]);
+    });
+
+    const top = (map) => Array.from(map.entries()).sort((a, b) => b[1] - a[1])[0];
+    const topCourier = top(couriers);
+    const topType = top(types);
+    const out = [
+      { label: 'Строк на странице', value: String(stat.total) },
+      { label: 'Открытых', value: stat.open + ' из ' + stat.total }
+    ];
+    if (stat.dated) out.push({ label: 'Открыты дольше суток', value: String(stat.old), alarm: stat.old > 0 });
+    if (counted.length) {
+      out.push({ label: 'По проблемным фасовкам', value: String(stat.flagged) });
+      out.push({
+        label: 'Доля проблемных',
+        value: stat.flagged + ' из ' + stat.total + ' · ' + Math.round((stat.flagged / stat.total) * 100) + '%'
+      });
+    }
+    if (topCourier) out.push({ label: 'Чаще всех курьер', value: topCourier[0] + ' — ' + topCourier[1] });
+    if (topType) out.push({ label: 'Чаще всего тип', value: topType[0] + ' — ' + topType[1] });
+    return out;
+  }
+
   /** Перечитывает значения со страницы и обновляет строки панели. */
   function fillSidePanel() {
     const root = rootEl;
@@ -3233,7 +3346,17 @@
       body.appendChild(row);
     });
 
-    if (!shown) body.appendChild(h('div', 'side-empty', 'На этой странице данных для панели нет'));
+    const summary = pageListSummary();
+    if (summary) {
+      body.appendChild(h('div', 'side-note', 'Список на этой странице'));
+      summary.forEach((item) => {
+        const row = h('div', 'side-row' + (item.alarm ? ' side-alarm' : ''));
+        row.append(h('span', 'side-label', item.label), h('span', 'side-value', item.value));
+        body.appendChild(row);
+      });
+    } else if (!shown) {
+      body.appendChild(h('div', 'side-empty', 'На этой странице данных для панели нет'));
+    }
     if (queueConfig().enabled) body.appendChild(noteBlock());
   }
 
@@ -3563,18 +3686,126 @@
   // ---------- Контекст страницы ----------
 
   /** Текст переписки: по селектору из настроек, иначе — видимый текст страницы. */
-  function aiPageText() {
+  // Обвязка страницы: меню, шапка, подвал, формы. В переписку это не идёт.
+  const PAGE_NOISE = [
+    'nav', 'header', 'footer', 'aside', 'script', 'style', 'noscript', 'svg', 'form', 'select', 'iframe',
+    '[role="navigation"]', '[role="banner"]', '[role="contentinfo"]', '[role="menu"]', '[role="menubar"]',
+    '.nav', '.navbar', '.nav-tabs', '.menu', '.dropdown-menu', '.sidebar', '.side-menu', '.breadcrumb',
+    '.breadcrumbs', '.header', '.footer', '.pagination', '.pager', '.toolbar'
+  ].join(', ');
+
+  /**
+   * Строки-пункты меню: короткая ссылка, у которой рядом ещё несколько таких же.
+   * На тикет-системах меню часто свёрстано обычными <ul><li><a>, без тега nav.
+   */
+  function menuLines(node) {
+    const lines = new Set();
+    const groups = new Map();
+    let links = [];
+    try { links = Array.prototype.slice.call(node.querySelectorAll('a[href]')); } catch (e) { return lines; }
+    links.forEach((link) => {
+      const text = nodeText(link);
+      if (!text || text.length > 40) return;
+      const group = link.parentElement && link.parentElement.parentElement;
+      if (!group) return;
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push(text);
+    });
+    groups.forEach((items) => {
+      if (items.length >= 5) items.forEach((text) => lines.add(text));
+    });
+    return lines;
+  }
+
+  /**
+   * Текст элемента без обвязки. Считаем построчно: берём innerText целиком
+   * (только он расставляет переводы строк по-человечески) и вычитаем строки,
+   * пришедшие из меню и шапок.
+   */
+  function contentText(node) {
+    if (!node) return '';
+    const drop = menuLines(node);
+    try {
+      Array.prototype.forEach.call(node.querySelectorAll(PAGE_NOISE), (el) => {
+        String(el.innerText || el.textContent || '').split('\n').forEach((line) => {
+          const clean = line.replace(/\s+/g, ' ').trim();
+          if (clean) drop.add(clean);
+        });
+      });
+    } catch (e) { /* селектор постоянный, но подстрахуемся */ }
+
+    const lines = String(node.innerText || node.textContent || '')
+      .split('\n')
+      .map((line) => line.replace(/\s+/g, ' ').trim())
+      .filter((line) => line && !drop.has(line));
+    return lines.filter((line, index) => !(index && line === lines[index - 1])).join('\n');
+  }
+
+  /**
+   * Самый похожий на переписку блок страницы: несколько однотипных соседей с текстом.
+   * Так диалог находится без селектора — на любой вёрстке, где сообщения идут подряд.
+   */
+  function guessChatRoot(doc, minKids) {
+    const scope = doc || document;
+    const least = Math.max(2, Number(minKids) || 3);
+    let best = null;
+    let bestScore = 0;
+    let nodes = [];
+    try { nodes = Array.prototype.slice.call(scope.querySelectorAll('div, ul, ol, section, tbody')); }
+    catch (e) { return null; }
+
+    nodes.forEach((node) => {
+      if (rootEl && node.getRootNode && node.getRootNode() === rootEl) return;   // наша же панель
+      if (node.matches && node.matches(PAGE_NOISE)) return;
+      const kids = Array.prototype.filter.call(node.children || [], (kid) => nodeText(kid).length >= 25);
+      if (kids.length < least) return;
+
+      const tags = {};
+      kids.forEach((kid) => { tags[kid.tagName] = (tags[kid.tagName] || 0) + 1; });
+      const same = Object.keys(tags).reduce((max, tag) => Math.max(max, tags[tag]), 0);
+      if (same < least || same < kids.length * 0.6) return;                      // разнородная мешанина
+
+      const length = kids.reduce((sum, kid) => sum + nodeText(kid).length, 0);
+      const score = length * Math.min(same, 12);            // важны и объём, и число сообщений
+      if (score > bestScore) { bestScore = score; best = node; }
+    });
+    return best;
+  }
+
+  /** Сообщения внутри найденного блока диалога. */
+  function chatMessages(root) {
+    if (!root) return [];
+    return Array.prototype.filter.call(root.children || [], (kid) => nodeText(kid).length >= 25);
+  }
+
+  /** Где на странице лежит переписка и что из неё берём. */
+  function chatSource() {
     const conf = aiConfig();
-    const limit = Math.max(500, Number(conf.contextLimit) || 6000);
-    let text = '';
     if (conf.chatSelector) {
       try {
         const nodes = Array.prototype.slice.call(document.querySelectorAll(conf.chatSelector));
-        text = nodes.map((node) => nodeText(node)).filter(Boolean).join('\n');
-      } catch (e) { text = ''; }
+        const text = nodes.map((node) => contentText(node)).filter(Boolean).join('\n');
+        if (text) return { from: 'по вашему селектору', text: text };
+      } catch (e) { return { from: 'селектор не понят — взяли страницу', text: contentText(document.body) }; }
     }
-    if (!text) text = String(document.body && document.body.innerText || '').replace(/\n{3,}/g, '\n\n');
-    text = text.trim();
+
+    const guess = guessChatRoot();
+    if (guess) {
+      const text = contentText(guess);
+      if (text) return { from: 'блок диалога найден сам', text: text };
+    }
+
+    const main = document.querySelector('main, article, [role="main"], #content, .content, #main');
+    if (main) {
+      const text = contentText(main);
+      if (text) return { from: 'основная часть страницы', text: text };
+    }
+    return { from: 'вся страница без меню', text: contentText(document.body) };
+  }
+
+  function aiPageText() {
+    const limit = Math.max(500, Number(aiConfig().contextLimit) || 6000);
+    const text = String(chatSource().text || '').replace(/\n{3,}/g, '\n\n').trim();
     return text.length > limit ? '…\n' + text.slice(-limit) : text;   // хвост важнее начала
   }
 
@@ -4702,6 +4933,42 @@
     return { columns: columns, rows: out };
   }
 
+  /**
+   * Колонка по названию из настроек: точное совпадение, потом «начинается с», потом вхождение.
+   * «Дата» найдёт «Дата создания» — иначе колонка молча не находится, период отсекает всё,
+   * и вкладка курьеров показывает ноль при полном списке тикетов.
+   */
+  function matchColumn(columns, wanted) {
+    const needle = normalizeText(wanted).replace(/[:：]$/, '');
+    if (!needle) return '';
+    const list = (columns || []).filter(Boolean);
+    const find = (test) => list.filter((name) => test(normalizeText(name).replace(/[:：]$/, '')))[0] || '';
+    return find((name) => name === needle) ||
+           find((name) => name.indexOf(needle) === 0) ||
+           find((name) => name.indexOf(needle) !== -1) ||
+           find((name) => needle.indexOf(name) === 0 && name.length > 2);
+  }
+
+  const COLUMN_KEYS = ['dateColumn', 'typeColumn', 'statusColumn', 'courierColumn', 'packColumn'];
+
+  /** Настройки колонок, сведённые с заголовками таблицы. Возвращает и то, что не нашлось. */
+  function resolveColumns(conf, columns) {
+    const out = Object.assign({}, conf);
+    const missing = [];
+    const fixed = [];
+    if (!columns || !columns.length) return { conf: out, missing: missing, fixed: fixed };
+
+    COLUMN_KEYS.forEach((key) => {
+      const wanted = String(conf[key] || '').trim();
+      if (!wanted) return;
+      const found = matchColumn(columns, wanted);
+      if (!found) { missing.push(wanted); return; }
+      if (normalizeText(found) !== normalizeText(wanted)) fixed.push(wanted + ' → ' + found);
+      out[key] = found;
+    });
+    return { conf: out, missing: missing, fixed: fixed };
+  }
+
   /** Читает список тикетов, обходя страницы. Возвращает {rows, columns, error}. */
   async function fetchQueue(force) {
     const conf = queueConfig();
@@ -4837,11 +5104,11 @@
    * Сводка по курьерам за период. Тикеты и заказы считаются по своим спискам,
    * доля = тикеты ÷ заказы: сколько выкладок этого курьера закончилось обращением.
    */
-  function courierStats(ticketRows, orderRows, conf, days) {
+  function courierStats(ticketRows, orderRows, conf, days, orderColumns) {
     const since = periodStart(days);
     const packs = (panelConfig().packs || {}).counted || [];
     const counted = packs.map(normalizeText);
-    const orderConf = ordersConfig();
+    const orderConf = Object.assign({}, ordersConfig(), orderColumns || {});
     const map = new Map();
 
     const item = (name) => {
@@ -4884,9 +5151,9 @@
   }
 
   /** Разбивка по дням для карточки курьера: продано и сколько из этого обернулось тикетом. */
-  function courierDays(courier, ticketRows, orderRows, conf, days) {
+  function courierDays(courier, ticketRows, orderRows, conf, days, orderColumns) {
     const since = periodStart(days);
-    const orderConf = ordersConfig();
+    const orderConf = Object.assign({}, ordersConfig(), orderColumns || {});
     const map = new Map();
     const sameCourier = (value) => String(value || '').trim() === courier ||
       (!String(value || '').trim() && courier === '— без курьера —');
@@ -4999,23 +5266,31 @@
     return Object.assign({}, DEFAULT_LEARN, config.learn || {});
   }
 
-  /** Текст последнего ответа оператора со страницы тикета. */
+  /**
+   * Текст последнего ответа оператора со страницы тикета.
+   * Селектор в настройках — самый точный путь, но без него блок диалога ищется сам:
+   * иначе прогон по закрытым молча пропускает все тикеты до единого.
+   */
   function operatorReply(doc, conf) {
-    const selector = String(conf.operatorSelector || '').trim();
-    let nodes = [];
-    if (selector) {
-      try { nodes = Array.prototype.slice.call(doc.querySelectorAll(selector)); } catch (e) { nodes = []; }
-    }
-    let sure = !!nodes.length;
+    const pick = (selector) => {
+      if (!selector) return [];
+      try { return Array.prototype.slice.call(doc.querySelectorAll(selector)); } catch (e) { return []; }
+    };
+
+    let nodes = pick(String(conf.operatorSelector || '').trim());
+    let how = nodes.length ? 'по вашему селектору' : '';
     if (!nodes.length) {
-      const fallback = String(aiConfig().chatSelector || '').trim();
-      if (fallback) {
-        try { nodes = Array.prototype.slice.call(doc.querySelectorAll(fallback)); } catch (e) { nodes = []; }
-      }
+      nodes = pick(String(aiConfig().chatSelector || '').trim());
+      if (nodes.length) how = 'по селектору переписки';
     }
-    if (!nodes.length) return { text: '', sure: false };
-    const text = String(nodes[nodes.length - 1].textContent || '').replace(/\s+/g, ' ').trim();
-    return { text: text.slice(0, 700), sure: sure };
+    if (!nodes.length) {
+      nodes = chatMessages(guessChatRoot(doc, 2));        // в закрытом тикете переписка бывает из двух реплик
+      if (nodes.length) how = 'последнее сообщение найденного диалога';
+    }
+    if (!nodes.length) return { text: '', sure: false, how: '' };
+
+    const text = nodeText(nodes[nodes.length - 1]);
+    return { text: text.slice(0, 700), sure: how === 'по вашему селектору', how: how };
   }
 
   /** Ключ похожести: без чисел, имён-заглушек и лишних пробелов. */
@@ -5054,6 +5329,8 @@
     const examples = [];
     let read = 0;
     let skipped = 0;
+    let how = '';                                          // чем нашли ответ оператора
+    let sample = '';                                       // что увидели там, где ответа не нашлось
 
     for (let i = 0; i < closed.length; i++) {
       if (shouldStop && shouldStop()) break;
@@ -5069,7 +5346,12 @@
 
       read += 1;
       const reply = operatorReply(doc, learn);
-      if (!reply.text || reply.text.length < 20) { skipped += 1; continue; }
+      if (!how && reply.how) how = reply.how;
+      if (!reply.text || reply.text.length < 20) {
+        skipped += 1;
+        if (!sample) sample = reply.text || nodeText(doc.body).slice(0, 200);
+        continue;
+      }
 
       const key = replyKey(reply.text);
       if (!groups.has(key)) groups.set(key, { key: key, text: reply.text, count: 0, sure: reply.sure, samples: [] });
@@ -5102,7 +5384,7 @@
         title: shortTitle(group.text)
       }));
 
-    return { read: read, skipped: skipped, closed: closed.length, once: once,
+    return { read: read, skipped: skipped, closed: closed.length, once: once, how: how, sample: sample,
              candidates: candidates, examples: examples };
   }
 
@@ -5114,7 +5396,7 @@
 
   let queuePeriod = 7;                                    // общий период для статистики курьеров
 
-  function openCourierCard(courier, data, orders, conf, days) {
+  function openCourierCard(courier, data, orders, conf, days, orderColumns) {
     const overlay = createOverlay();
     const panel = h('div', 'panel');
     panel.style.width = 'min(820px, 100%)';
@@ -5157,7 +5439,7 @@
       line.appendChild(select);
       body.appendChild(line);
 
-      const daysRows = courierDays(courier, data.rows, orders.rows, conf, period);
+      const daysRows = courierDays(courier, data.rows, orders.rows, conf, period, orderColumns);
       const totals = daysRows.reduce((acc, day) => {
         acc.orders += day.orders;
         acc.tickets += day.tickets;
@@ -5244,7 +5526,9 @@
   let queueSort = { column: '', dir: 1 };
 
   async function openQueue(initialTab) {
-    const conf = queueConfig();
+    let conf = queueConfig();
+    let orderColumns = ordersConfig();
+    let columnNote = { missing: [], fixed: [] };
     const overlay = createOverlay();
     const panel = h('div', 'panel');
     panel.style.width = 'min(1000px, 100%)';
@@ -5283,6 +5567,9 @@
       body.appendChild(h('div', 'side-empty', 'Читаю список тикетов…'));
       data = await fetchQueue(force);
       orders = await fetchOrders(force);
+      columnNote = resolveColumns(queueConfig(), data.columns);
+      conf = columnNote.conf;                              // «Дата» → «Дата создания» и т. п.
+      orderColumns = resolveColumns(ordersConfig(), orders.columns).conf;
       render();
     };
 
@@ -5427,14 +5714,30 @@
       const holder = h('div', 'table-holder');
       body.appendChild(holder);
 
-      const stats = courierStats(data.rows, orders.rows, conf, queuePeriod);
-      note.textContent = orders.error
-        ? 'Заказы: ' + orders.error + ' — доля не считается'
-        : 'Заказов в списке: ' + orders.rows.length;
+      // период по колонке, которой нет, отсекает всё: честнее показать всё и сказать почему
+      const noDates = columnNote.missing.indexOf(String(queueConfig().dateColumn || '').trim()) !== -1;
+      const days = noDates ? 0 : queuePeriod;              // период по несуществующей колонке отсекает всё
+      const stats = courierStats(data.rows, orders.rows, conf, days, orderColumns);
+
+      const notes = [];
+      if (columnNote.fixed.length) notes.push('Колонки: ' + columnNote.fixed.join(', '));
+      if (columnNote.missing.length) notes.push('Не нашёл колонки: ' + columnNote.missing.join(', ') +
+        (noDates ? ' — период не применяю' : ''));
+      if (orders.error) notes.push('Заказы: ' + orders.error + ' — доля не считается');
+      else if (!ordersConfig().url) notes.push('Список заказов не указан — доля не считается ' +
+        '(вкладка «Очередь» → «Список заказов»)');
+      else if (!orders.rows.length) notes.push('По адресу ' + ordersConfig().url +
+        ' не прочиталось ни одной строки — проверьте адрес и таблицу');
+      else notes.push('Заказов в списке: ' + orders.rows.length);
+      note.textContent = notes.join(' · ');
       count.textContent = 'Курьеров: ' + stats.length + ' · тикетов: ' + data.rows.length;
 
       if (!stats.length) {
-        holder.appendChild(h('div', 'side-empty', data.error || 'За этот период ничего нет'));
+        const why = data.error ||
+          (!data.rows.length ? 'Список тикетов пуст — проверьте адрес на вкладке «Очередь»'
+                             : 'Ни одна строка не попала в период. Колонка дат: «' + conf.dateColumn + '»' +
+                               (data.columns.length ? '. В таблице есть: ' + data.columns.join(', ') : ''));
+        holder.appendChild(h('div', 'side-empty', why));
         return;
       }
 
@@ -5456,7 +5759,8 @@
         const tr = h('tr');
         tr.style.cursor = 'pointer';
         tr.title = 'Открыть карточку курьера';
-        tr.addEventListener('click', () => openCourierCard(item.courier, data, orders, conf, queuePeriod));
+        tr.addEventListener('click', () =>
+          openCourierCard(item.courier, data, orders, conf, days, orderColumns));
         tr.appendChild(h('td', null, item.courier));
         tr.appendChild(h('td', null, item.orders ? String(item.orders) : '—'));
         tr.appendChild(h('td', null, String(item.tickets)));
@@ -5678,10 +5982,15 @@
         if (!result) return;
         count.textContent = 'Прочитано: ' + result.read + ' из ' + result.closed +
           (result.skipped ? ' · пропущено: ' + result.skipped : '') +
-          (result.once ? ' · единичных ответов: ' + result.once : '');
+          (result.once ? ' · единичных ответов: ' + result.once : '') +
+          (result.how ? ' · ответ ищем: ' + result.how : '');
         if (!result.candidates.length) {
-          holder.appendChild(h('div', 'side-empty',
-            'Повторяющихся ответов не нашлось. Проверьте селектор сообщений оператора в настройках.'));
+          const why = result.read && result.skipped >= result.read
+            ? 'Ни в одном тикете не нашёлся ответ оператора' +
+              (result.sample ? '. Вот что было на странице вместо него: «' + result.sample.slice(0, 160) + '…»' : '') +
+              '. Откройте тикет, нажмите «Указать» у поля «Сообщения оператора» и ткните в свой ответ.'
+            : 'Повторяющихся ответов не нашлось: каждый ответ встретился один раз.';
+          holder.appendChild(h('div', 'side-empty', why));
           return;
         }
 
