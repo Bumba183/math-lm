@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      2.6.0
+// @version      2.7.0
 // @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам, помощник на модели и автоподстановка проверенных шагов.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -175,6 +175,8 @@
     statusColumn: 'Статус',
     courierColumn: 'Курьер',
     packColumn: 'Фасовка',
+    answerColumn: 'Последний ответ',   // колонка с последним ответом
+    waitingSelector: '',               // признак «ждём ответа» прямо в строке списка
     refreshMin: 5,
     notify: false
   };
@@ -1947,6 +1949,33 @@
                    text('Проверять новые каждые, мин', 'refreshMin', '5', 'num'));
       body.appendChild(grid4);
 
+      // «Ждут ответа» — не то же самое, что «открыт», поэтому признак задаёте вы
+      const waitBox = h('div', 'note-box');
+      waitBox.style.marginTop = '14px';
+      const waitHint = h('p', 'hint');
+      waitHint.style.marginTop = '0';
+      waitHint.innerHTML = '<b>Ждут ответа.</b> Открытый тикет и тикет, где ждут вашего ответа, — разные вещи. ' +
+        'Если сайт помечает такие строки (подсветкой, значком, классом), нажмите «Указать» и ткните в саму ' +
+        'пометку. Без пометки признаком считается пустая ячейка последнего ответа.';
+      waitBox.appendChild(waitHint);
+
+      const waitLine = h('div', 'line');
+      const waitInput = h('input');
+      waitInput.type = 'text';
+      waitInput.value = queue.waitingSelector || '';
+      waitInput.placeholder = 'например .row-unanswered или .badge-new';
+      waitInput.addEventListener('input', () => { queue.waitingSelector = waitInput.value.trim(); });
+      const waitPick = h('button', null, 'Указать');
+      waitPick.addEventListener('click', () => pickElement((path, el) => {
+        if (!el) return;
+        queue.waitingSelector = shortSelector(el);
+        waitInput.value = queue.waitingSelector;
+      }));
+      waitLine.append(waitInput, waitPick);
+      waitBox.appendChild(waitLine);
+      waitBox.appendChild(text('Колонка последнего ответа', 'answerColumn', 'Последний ответ'));
+      body.appendChild(waitBox);
+
       const notifyLabel = h('label', 'check');
       const notifyBox = h('input');
       notifyBox.type = 'checkbox';
@@ -3241,6 +3270,31 @@
    * На странице тикетов полям заказа взяться неоткуда, и вместо «данных нет»
    * панель показывает то, ради чего в список и заходят.
    */
+  /**
+   * Как отличить тикет, где ждут нашего ответа. От точного к грубому:
+   * признак, который ставит сам сайт (класс, иконка, подсветка строки), потом пустая
+   * ячейка последнего ответа. Если не настроено ни то ни другое — не гадаем.
+   */
+  function waitingRule(conf, columns) {
+    const selector = String(conf.waitingSelector || '').trim();
+    if (selector) return { kind: 'selector', selector: selector, note: 'признак в строке' };
+    const column = matchColumn(columns, conf.answerColumn || '');
+    if (column) return { kind: 'empty', column: column, note: 'пустая колонка «' + column + '»' };
+    return { kind: 'none', note: '' };
+  }
+
+  function isWaiting(row, rule) {
+    if (!rule || rule.kind === 'none') return false;
+    if (rule.kind === 'selector') {
+      const node = row.node;
+      if (!node) return false;
+      try { return !!((node.matches && node.matches(rule.selector)) || node.querySelector(rule.selector)); }
+      catch (e) { return false; }
+    }
+    const value = String(row.values[rule.column] || '').replace(/[—–-]/g, '').trim();
+    return !value;
+  }
+
   function onQueueListPage() {
     const url = expandUrl(queueConfig().url || '', location.href);
     if (!url) return false;
@@ -3254,54 +3308,110 @@
     if (!onQueueListPage()) return null;
     const parsed = readQueueTable(document, queueConfig());
     if (!parsed || parsed.rows.length < 2) return null;
-    const conf = resolveColumns(queueConfig(), parsed.columns).conf;
 
-    const packs = panelConfig().packs || {};
-    const counted = (packs.counted || []).map(normalizeText);
-    const closed = /закр|выполн|решен|отклон/i;
-    const now = Date.now();
-    const stat = { total: parsed.rows.length, open: 0, old: 0, flagged: 0, dated: 0 };
+    const resolved = resolveColumns(queueConfig(), parsed.columns);
+    const conf = resolved.conf;
+    const missing = (name) => resolved.missing.indexOf(String(name || '').trim()) !== -1;
+    const rule = waitingRule(conf, parsed.columns);
+
+    const counted = ((panelConfig().packs || {}).counted || []).map(normalizeText);
+    const statuses = new Map();
     const couriers = new Map();
-    const types = new Map();
-    const bump = (map, key) => { if (key) map.set(key, (map.get(key) || 0) + 1); };
+    const waiting = [];
+    let flagged = 0;
+    const bump = (map, key) => { const value = String(key || '').trim(); if (value) map.set(value, (map.get(value) || 0) + 1); };
 
     parsed.rows.forEach((row) => {
-      const status = row.values[conf.statusColumn] || '';
-      const isOpen = !status || !closed.test(status);
-      if (isOpen) stat.open += 1;
+      bump(statuses, row.values[conf.statusColumn]);
+      bump(couriers, row.values[conf.courierColumn]);
 
-      const date = parseDate(row.values[conf.dateColumn] || '');
-      if (date) {
-        stat.dated += 1;
-        if (isOpen && now - date.getTime() > 86400000) stat.old += 1;
+      if (counted.length && !missing(queueConfig().packColumn)) {
+        const pack = normalizeText(row.values[conf.packColumn] || '');
+        const text = pack || normalizeText(Object.keys(row.values).map((key) => row.values[key]).join(' '));
+        if (counted.some((value) => text.indexOf(value) !== -1)) flagged += 1;
       }
 
-      const pack = normalizeText(row.values[conf.packColumn] || '');
-      const text = pack || normalizeText(Object.keys(row.values).map((key) => row.values[key]).join(' '));
-      if (counted.length && counted.some((value) => text.indexOf(value) !== -1)) stat.flagged += 1;
-
-      bump(couriers, row.values[conf.courierColumn]);
-      bump(types, row.values[conf.typeColumn]);
+      if (isWaiting(row, rule)) {
+        waiting.push({
+          title: String(row.values[parsed.columns[0]] || row.key || '').slice(0, 24),
+          sub: [row.values[conf.courierColumn], row.values[conf.dateColumn]].filter(Boolean).join(' · ').slice(0, 48),
+          href: row.href
+        });
+      }
     });
 
-    const top = (map) => Array.from(map.entries()).sort((a, b) => b[1] - a[1])[0];
-    const topCourier = top(couriers);
-    const topType = top(types);
-    const out = [
-      { label: 'Строк на странице', value: String(stat.total) },
-      { label: 'Открытых', value: stat.open + ' из ' + stat.total }
-    ];
-    if (stat.dated) out.push({ label: 'Открыты дольше суток', value: String(stat.old), alarm: stat.old > 0 });
-    if (counted.length) {
-      out.push({ label: 'По проблемным фасовкам', value: String(stat.flagged) });
-      out.push({
-        label: 'Доля проблемных',
-        value: stat.flagged + ' из ' + stat.total + ' · ' + Math.round((stat.flagged / stat.total) * 100) + '%'
-      });
+    const total = parsed.rows.length;
+    const top = (map, limit) => Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, limit || 1);
+    const rows = [{ label: 'Строк на странице', value: String(total) }];
+
+    if (missing(queueConfig().statusColumn)) {
+      rows.push({ label: 'Статусы', value: 'нет колонки «' + queueConfig().statusColumn + '»' });
+    } else if (statuses.size) {
+      rows.push({ label: 'Статусы', value: top(statuses, 3).map((pair) => pair[0] + ' — ' + pair[1]).join(', ') });
     }
-    if (topCourier) out.push({ label: 'Чаще всех курьер', value: topCourier[0] + ' — ' + topCourier[1] });
-    if (topType) out.push({ label: 'Чаще всего тип', value: topType[0] + ' — ' + topType[1] });
-    return out;
+
+    if (counted.length) {
+      rows.push(missing(queueConfig().packColumn)
+        ? { label: 'По проблемным фасовкам', value: 'нет колонки «' + queueConfig().packColumn + '»' }
+        : { label: 'По проблемным фасовкам',
+            value: flagged + ' из ' + total + ' · ' + Math.round((flagged / total) * 100) + '%' });
+    }
+
+    const topCourier = top(couriers)[0];
+    if (topCourier) rows.push({ label: 'Чаще всех курьер', value: topCourier[0] + ' — ' + topCourier[1] });
+
+    return { rows: rows, waiting: waiting, rule: rule, total: total };
+  }
+
+  /** Список тикетов, где ждут нашего ответа: кликом открывается тикет. */
+  function waitingBlock(summary) {
+    const box = h('div');
+    if (summary.rule.kind === 'none') {
+      const row = h('div', 'side-row');
+      row.style.cursor = 'pointer';
+      row.title = 'Открыть настройки списка';
+      row.append(h('span', 'side-label', 'Ждут ответа'), h('span', 'side-value side-dim', 'нечем отличить →'));
+      row.addEventListener('click', () => openSettings('queue'));
+      box.appendChild(row);
+      return box;
+    }
+
+    const head = h('div', 'side-note');
+    head.textContent = 'Ждут ответа: ' + summary.waiting.length + ' из ' + summary.total +
+      ' на этой странице · ' + summary.rule.note;
+    box.appendChild(head);
+
+    // в панели — только открытая страница; очередь обходит все и помнит заметки
+    if (queueCache.rows.length > summary.total) {
+      const whole = queueCache.rows.filter((row) => isWaiting(row, summary.rule)).length;
+      const row = h('div', 'side-row');
+      row.style.cursor = 'pointer';
+      row.title = 'Открыть очередь по всем страницам';
+      row.append(h('span', 'side-label', 'Во всей очереди'),
+                 h('span', 'side-value', whole + ' из ' + queueCache.rows.length + ' →'));
+      row.addEventListener('click', () => openQueue('list', { waiting: true }));
+      box.appendChild(row);
+    }
+
+    if (!summary.waiting.length) {
+      box.appendChild(h('div', 'side-empty', 'Все отвечены'));
+      return box;
+    }
+
+    summary.waiting.slice(0, 12).forEach((item) => {
+      const row = h('div', 'side-row');
+      row.append(h('span', 'side-label', item.title), h('span', 'side-value side-dim', item.sub));
+      if (item.href) {
+        row.style.cursor = 'pointer';
+        row.title = 'Открыть тикет в новой вкладке';
+        row.addEventListener('click', () => window.open(item.href, '_blank', 'noopener'));
+      }
+      box.appendChild(row);
+    });
+    if (summary.waiting.length > 12) {
+      box.appendChild(h('div', 'side-empty', 'и ещё ' + (summary.waiting.length - 12) + ' — смотрите в очереди ☰'));
+    }
+    return box;
   }
 
   /** Перечитывает значения со страницы и обновляет строки панели. */
@@ -3347,17 +3457,22 @@
     });
 
     const summary = pageListSummary();
+    const aiRow = side.querySelector('.ai-row');
+    if (aiRow) aiRow.style.display = summary ? 'none' : '';   // на списке кнопкам ИИ нечего разбирать
+
     if (summary) {
       body.appendChild(h('div', 'side-note', 'Список на этой странице'));
-      summary.forEach((item) => {
+      summary.rows.forEach((item) => {
         const row = h('div', 'side-row' + (item.alarm ? ' side-alarm' : ''));
         row.append(h('span', 'side-label', item.label), h('span', 'side-value', item.value));
         body.appendChild(row);
       });
+      body.appendChild(waitingBlock(summary));
     } else if (!shown) {
       body.appendChild(h('div', 'side-empty', 'На этой странице данных для панели нет'));
     }
-    if (queueConfig().enabled) body.appendChild(noteBlock());
+    // заметка и напоминание — про конкретный тикет, на списке их не показываем
+    if (queueConfig().enabled && !summary) body.appendChild(noteBlock());
   }
 
   function startWatchingPage() {
@@ -4928,7 +5043,8 @@
       });
       const link = row.querySelector('a[href]');
       const href = link ? expandUrl(link.getAttribute('href'), docUrl(doc)) : '';
-      out.push({ values: values, href: href || '', key: ticketKey(href || JSON.stringify(values)) });
+      out.push({ values: values, href: href || '', node: row,
+                 key: ticketKey(href || JSON.stringify(values)) });
     });
     return { columns: columns, rows: out };
   }
@@ -5114,10 +5230,24 @@
     const item = (name) => {
       const courier = String(name || '').trim() || '— без курьера —';
       if (!map.has(courier)) {
-        map.set(courier, { courier: courier, tickets: 0, orders: 0, flagged: 0, last: '', lastTs: 0 });
+        map.set(courier, { courier: courier, tickets: 0, orders: 0, flagged: 0, last: '', lastTs: 0,
+                           day: 0, week: 0, month: 0, dated: 0 });
       }
       return map.get(courier);
     };
+
+    // день / неделя / месяц считаются всегда: за этим на вкладку и приходят
+    const now = Date.now();
+    ticketRows.forEach((row) => {
+      const when = parseDate(row.values[conf.dateColumn] || '');
+      if (!when) return;
+      const entry = item(row.values[conf.courierColumn]);
+      entry.dated += 1;
+      const age = now - when.getTime();
+      if (age <= 86400000) entry.day += 1;
+      if (age <= 7 * 86400000) entry.week += 1;
+      if (age <= 30 * 86400000) entry.month += 1;
+    });
 
     ticketRows.forEach((row) => {
       if (!inPeriod(row, conf.dateColumn, since)) return;
@@ -5331,18 +5461,25 @@
     let skipped = 0;
     let how = '';                                          // чем нашли ответ оператора
     let sample = '';                                       // что увидели там, где ответа не нашлось
+    const log = [];                                        // по строке на каждый прочитанный тикет
 
     for (let i = 0; i < closed.length; i++) {
       if (shouldStop && shouldStop()) break;
       const row = closed[i];
       if (onProgress) onProgress({ done: i, total: closed.length, ticket: row.values[Object.keys(row.values)[0]] || '' });
+      const ticketId = String(row.values[Object.keys(row.values)[0]] || row.key || '').slice(0, 24);
+      const note = (result, text) => log.push({
+        ticket: ticketId, url: row.href, result: result, text: String(text || '').slice(0, 300),
+        type: String(row.values[queue.typeColumn] || '').slice(0, 80)
+      });
+
       let doc = null;
       try {
         const response = await fetch(row.href, { credentials: 'include' });
-        if (!response.ok) { skipped += 1; continue; }
+        if (!response.ok) { skipped += 1; note('не открылся', 'HTTP ' + response.status); continue; }
         doc = new DOMParser().parseFromString(await response.text(), 'text/html');
         doc.arhUrl = row.href;
-      } catch (e) { skipped += 1; continue; }
+      } catch (e) { skipped += 1; note('не открылся', e && e.message || e); continue; }
 
       read += 1;
       const reply = operatorReply(doc, learn);
@@ -5350,8 +5487,10 @@
       if (!reply.text || reply.text.length < 20) {
         skipped += 1;
         if (!sample) sample = reply.text || nodeText(doc.body).slice(0, 200);
+        note('ответ не найден', reply.text || nodeText(doc.body).slice(0, 200));
         continue;
       }
+      note('прочитан', reply.text);
 
       const key = replyKey(reply.text);
       if (!groups.has(key)) groups.set(key, { key: key, text: reply.text, count: 0, sure: reply.sure, samples: [] });
@@ -5384,8 +5523,17 @@
         title: shortTitle(group.text)
       }));
 
+    // в логе отмечаем, в какую группу попал ответ: видно, что именно склеилось
+    const groupOf = new Map();
+    candidates.forEach((group) => groupOf.set(group.key, group.id + ' · ' + group.title));
+    log.forEach((line) => {
+      if (line.result !== 'прочитан') return;
+      const id = groupOf.get(replyKey(line.text));
+      line.group = id || 'единичный ответ';
+    });
+
     return { read: read, skipped: skipped, closed: closed.length, once: once, how: how, sample: sample,
-             candidates: candidates, examples: examples };
+             candidates: candidates, examples: examples, log: log };
   }
 
   function aiSleepMs(ms) {
@@ -5525,7 +5673,7 @@
 
   let queueSort = { column: '', dir: 1 };
 
-  async function openQueue(initialTab) {
+  async function openQueue(initialTab, options) {
     let conf = queueConfig();
     let orderColumns = ordersConfig();
     let columnNote = { missing: [], fixed: [] };
@@ -5560,7 +5708,8 @@
     let active = ['couriers', 'rules', 'accuracy', 'learn'].indexOf(initialTab) !== -1 ? initialTab : 'list';
     let data = { rows: [], columns: [], error: '' };
     let orders = { rows: [], columns: [], error: '' };
-    const filters = { text: '', type: '', status: '', courier: '', onlyNotes: false };
+    const filters = { text: '', type: '', status: '', courier: '', onlyNotes: false,
+                      onlyWaiting: !!(options && options.waiting) };
 
     const load = async (force) => {
       body.textContent = '';
@@ -5581,6 +5730,7 @@
         if (filters.status && row.values[conf.statusColumn] !== filters.status) return false;
         if (filters.courier && row.values[conf.courierColumn] !== filters.courier) return false;
         if (filters.onlyNotes && !notes[row.key]) return false;
+        if (filters.onlyWaiting && !isWaiting(row, waitingRule(conf, data.columns))) return false;
         if (!needle) return true;
         return normalizeText(Object.keys(row.values).map((key) => row.values[key]).join(' ')).indexOf(needle) !== -1;
       });
@@ -5628,6 +5778,19 @@
       box.addEventListener('change', () => { filters.onlyNotes = box.checked; renderTable(); });
       onlyNotes.append(box, document.createTextNode('с заметкой'));
       line.appendChild(onlyNotes);
+
+      const rule = waitingRule(conf, data.columns);
+      if (rule.kind !== 'none') {
+        const onlyWaiting = h('label', 'check');
+        onlyWaiting.style.marginTop = '0';
+        onlyWaiting.title = 'Признак: ' + rule.note;
+        const waitBox = h('input');
+        waitBox.type = 'checkbox';
+        waitBox.checked = filters.onlyWaiting;
+        waitBox.addEventListener('change', () => { filters.onlyWaiting = waitBox.checked; renderTable(); });
+        onlyWaiting.append(waitBox, document.createTextNode('ждут ответа'));
+        line.appendChild(onlyWaiting);
+      }
       body.appendChild(line);
 
       const holder = h('div', 'table-holder');
@@ -5692,9 +5855,11 @@
 
     function renderCouriers() {
       const hint = h('p', 'hint');
-      hint.innerHTML = 'Тикеты — из списка тикетов, <b>заказы</b> — из списка заказов (настраивается на вкладке ' +
-        '«Очередь»). <b>Доля</b> = тикеты ÷ заказы: сколько выкладок обернулось обращением. ' +
-        'Клик по строке открывает карточку курьера по дням.';
+      hint.innerHTML = '<b>День / неделя / месяц</b> — тикеты за сутки, 7 и 30 дней; они считаются всегда, ' +
+        'выбранный период на них не влияет. <b>Заказов</b>, <b>тикетов</b> и <b>доля</b> — за выбранный период: ' +
+        'доля = тикеты ÷ заказы, то есть сколько выкладок обернулось обращением (список заказов настраивается ' +
+        'на вкладке «Очередь»). Клик по строке открывает карточку курьера по дням: за каждое число — ' +
+        'сколько продано и сколько по ним пришло тикетов.';
       body.appendChild(hint);
 
       const line = h('div', 'line');
@@ -5744,9 +5909,12 @@
       const table = h('table', 'grid');
       const header = h('tr');
       [['Курьер', 'Значение колонки «' + conf.courierColumn + '»'],
-       ['Заказов', 'Строк списка заказов за период'],
-       ['Тикетов', 'Строк списка тикетов за период'],
-       ['Доля', 'Тикеты ÷ заказы'],
+       ['День', 'Тикетов за последние сутки — считается всегда, период на него не влияет'],
+       ['Неделя', 'Тикетов за 7 дней'],
+       ['Месяц', 'Тикетов за 30 дней'],
+       ['Заказов', 'Строк списка заказов за выбранный период'],
+       ['Тикетов', 'Строк списка тикетов за выбранный период'],
+       ['Доля', 'Тикеты ÷ заказы за выбранный период'],
        ['Проблемных', 'Тикеты по отмеченным фасовкам'],
        ['Последний тикет', 'Самая свежая дата тикета']].forEach((pair) => {
         const cell = h('th', null, pair[0]);
@@ -5762,6 +5930,9 @@
         tr.addEventListener('click', () =>
           openCourierCard(item.courier, data, orders, conf, days, orderColumns));
         tr.appendChild(h('td', null, item.courier));
+        tr.appendChild(h('td', null, item.dated ? String(item.day) : '—'));
+        tr.appendChild(h('td', null, item.dated ? String(item.week) : '—'));
+        tr.appendChild(h('td', null, item.dated ? String(item.month) : '—'));
         tr.appendChild(h('td', null, item.orders ? String(item.orders) : '—'));
         tr.appendChild(h('td', null, String(item.tickets)));
         const share = h('td', null, item.share == null
@@ -5977,6 +6148,68 @@
       let result = null;
       const chosen = new Set();
 
+      /** Лог прогона: по строке на тикет — что прочитали и куда это пошло. */
+      const drawLog = () => {
+        if (!result || !result.log || !result.log.length) return;
+        const box = document.createElement('details');
+        box.style.marginTop = '12px';
+        const summary = document.createElement('summary');
+        summary.textContent = 'Лог по тикетам (' + result.log.length + ')';
+        summary.style.cssText = 'cursor:pointer;font-size:12px;color:#5b6273';
+        box.appendChild(summary);
+
+        const save = h('button', null, 'Скачать лог');
+        save.style.margin = '8px 0';
+        save.addEventListener('click', () => {
+          try {
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(new Blob([JSON.stringify(result.log, null, 2)],
+              { type: 'application/json' }));
+            link.download = 'learn-log.json';
+            document.body.appendChild(link);
+            link.click();
+            setTimeout(() => { URL.revokeObjectURL(link.href); link.remove(); }, 1000);
+          } catch (e) { toast('Не удалось сохранить лог'); }
+        });
+        box.appendChild(save);
+
+        const table = h('table', 'grid');
+        const header = h('tr');
+        [['Тикет', 'Номер из списка'], ['Тип', 'Тип обращения'], ['Итог', 'Что вышло с этим тикетом'],
+         ['Куда пошло', 'В какую группу ответов попал'],
+         ['Что прочитано', 'Текст, который скрипт принял за ваш ответ']].forEach((pair) => {
+          const cell = h('th', null, pair[0]);
+          cell.title = pair[1];
+          header.appendChild(cell);
+        });
+        table.appendChild(header);
+
+        result.log.forEach((line) => {
+          const tr = h('tr');
+          const id = h('td', null, line.ticket || '—');
+          if (line.url) {
+            id.style.cursor = 'pointer';
+            id.title = 'Открыть тикет';
+            id.addEventListener('click', () => window.open(line.url, '_blank', 'noopener'));
+          }
+          tr.appendChild(id);
+          tr.appendChild(h('td', null, line.type || '—'));
+          const outcome = h('td', null, line.result);
+          if (line.result !== 'прочитан') outcome.className = 'bad-cell';
+          tr.appendChild(outcome);
+          tr.appendChild(h('td', null, line.group || '—'));
+          const text = h('td', null, String(line.text || '').slice(0, 160));
+          text.title = line.text || '';
+          tr.appendChild(text);
+          table.appendChild(tr);
+        });
+
+        const wrap = h('div', 'table-holder');
+        wrap.appendChild(table);
+        box.appendChild(wrap);
+        holder.appendChild(box);
+      };
+
       const drawResult = () => {
         holder.textContent = '';
         if (!result) return;
@@ -5991,6 +6224,7 @@
               '. Откройте тикет, нажмите «Указать» у поля «Сообщения оператора» и ткните в свой ответ.'
             : 'Повторяющихся ответов не нашлось: каждый ответ встретился один раз.';
           holder.appendChild(h('div', 'side-empty', why));
+          drawLog();
           return;
         }
 
@@ -6035,6 +6269,7 @@
           table.appendChild(tr);
         });
         holder.appendChild(table);
+        drawLog();
       };
 
       start.addEventListener('click', async () => {
