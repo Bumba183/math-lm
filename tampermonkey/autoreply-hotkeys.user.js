@@ -2,8 +2,8 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      2.4.0
-// @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам и помощник на модели.
+// @version      2.5.0
+// @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам, помощник на модели и автоподстановка проверенных шагов.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
 // @license      MIT
@@ -96,6 +96,17 @@
   };
 
   // Подключение модели (по умолчанию AiTunnel, подойдёт любой OpenAI-совместимый шлюз)
+  // Автоподстановка: включается только статистикой, и никогда не отправляет
+  const DEFAULT_AUTO = {
+    enabled: false,
+    minDecided: 10,
+    minShare: 0.85,
+    days: 60,
+    onOpen: false,
+    field: '',
+    blocked: ''
+  };
+
   const DEFAULT_AI = {
     enabled: false,
     base: 'https://api.aitunnel.ru/v1',
@@ -106,6 +117,7 @@
     contextLimit: 6000,
     chatSelector: '',
     tone: 'Вежливо, по-деловому, на «вы», без канцелярита и лишних извинений.',
+    auto: DEFAULT_AUTO,
     playbook: [
       '# Шаги разбирательства. «если» — слова-правило (сработает без модели),',
       '# «когда» — описание для модели, «ждём» — что ждём от покупателя дальше.',
@@ -1042,6 +1054,7 @@
     'table.grid td { padding: 6px 9px; border-top: 1px solid #eceef2; vertical-align: top; }',
     'table.grid tr:hover td { background: #f2f4f9; }',
     'table.grid .bad-cell { color: #b3261e; font-weight: 600; }',
+    'table.grid .good-cell { color: #1b7a3d; font-weight: 600; }',
     '.note-box { border-top: 1px solid #e6e8ee; margin-top: 8px; padding-top: 8px; }',
     '.note-box textarea { min-height: 56px; font-size: 12px; }',
     '@media (prefers-color-scheme: dark) {',
@@ -1058,6 +1071,8 @@
     '  table.grid th { background: #2a3040; }',
     '  table.grid td { border-color: #313745; }',
     '  table.grid tr:hover td { background: #262c38; }',
+    '  table.grid .bad-cell { color: #ff9a90; }',
+    '  table.grid .good-cell { color: #7fd6a0; }',
     '  .note-box { border-color: #313745; }',
     '  .overlay { color: #e7e9ee; }',
     '  .panel { background: #1e222b; }',
@@ -1092,10 +1107,16 @@
 
   let openOverlay = null;
 
+  let pendingOffer = null;                                // предложение, на которое ещё не ответили
+
   function closeOverlay() {
     if (openOverlay) {
       openOverlay.remove();
       openOverlay = null;
+    }
+    if (pendingOffer) {
+      logUpdate(pendingOffer, { dismissed: true });        // закрыли, не воспользовавшись
+      pendingOffer = null;
     }
     capturingHotkey = false;
   }
@@ -2253,12 +2274,130 @@
       limits.append(ctxLabel, tempLabel);
       body.appendChild(limits);
 
+      // ---- Автоподстановка: включается статистикой, а не желанием ----
+      ai.auto = Object.assign({}, DEFAULT_AUTO, ai.auto || {});   // своя копия: DEFAULT_AUTO трогать нельзя
+      const auto = ai.auto;
+
+      const autoBox = h('div', 'note-box');
+      autoBox.style.marginTop = '16px';
+      const autoHint = h('p', 'hint');
+      autoHint.style.marginTop = '0';
+      autoHint.innerHTML = '<b>Автоподстановка.</b> Шаг, который вы раз за разом принимаете, скрипт начинает ' +
+        'вставлять в поле сам — без окна с подтверждением. Границы жёсткие: <b>отправить он не может</b>, ' +
+        'непустое поле не трогает, тексты с <code>{ask:…}</code> пропускает, и берёт только шаги, набравшие ' +
+        'нужную долю по журналу. Доля считается от решённых предложений: принято ÷ (принято + закрыто).';
+      autoBox.appendChild(autoHint);
+
+      const autoOn = h('label', 'check');
+      const autoOnBox = h('input');
+      autoOnBox.type = 'checkbox';
+      autoOnBox.checked = !!auto.enabled;
+      autoOn.append(autoOnBox, document.createTextNode('Подставлять проверенные шаги без подтверждения'));
+      autoBox.appendChild(autoOn);
+
+      const autoOpen = h('label', 'check');
+      const autoOpenBox = h('input');
+      autoOpenBox.type = 'checkbox';
+      autoOpenBox.checked = !!auto.onOpen;
+      autoOpen.append(autoOpenBox,
+        document.createTextNode('Пробовать сразу при открытии тикета (только по правилам «если», без модели)'));
+      autoBox.appendChild(autoOpen);
+
+      const autoNums = h('div', 'row');
+      const numField = (title, key, hintText) => {
+        const wrap = h('label', null, title);
+        wrap.title = hintText;
+        const input = h('input', 'num');
+        input.type = 'text';
+        input.value = String(auto[key] == null ? '' : auto[key]);
+        input.style.marginTop = '4px';
+        wrap.appendChild(input);
+        autoNums.appendChild(wrap);
+        return input;
+      };
+      const minInput = numField('Решений до автоматики', 'minDecided',
+        'Сколько раз шаг должен быть принят или закрыт, прежде чем ему доверят подстановку');
+      const shareInput = h('input', 'num');
+      const shareLabel = h('label', null, 'Порог доли, %');
+      shareLabel.title = 'Ниже этой доли принятых шаг остаётся ручным';
+      shareInput.type = 'text';
+      shareInput.value = String(Math.round((Number(auto.minShare) || 0.85) * 100));
+      shareInput.style.marginTop = '4px';
+      shareLabel.appendChild(shareInput);
+      autoNums.appendChild(shareLabel);
+      const daysInput = numField('Считать за дней', 'days', 'Старые решения в долю не идут; 0 — за всё время');
+      autoBox.appendChild(autoNums);
+
+      const fieldLabel = h('label', null, 'Поле ответа (пусто — ищем сами: поле под курсором или самое крупное)');
+      fieldLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:12px;';
+      const fieldLine = h('div', 'line');
+      const fieldInput = h('input');
+      fieldInput.type = 'text';
+      fieldInput.value = auto.field || '';
+      fieldInput.placeholder = 'textarea[name="message"]';
+      const fieldPick = h('button', null, 'Указать');
+      fieldPick.addEventListener('click', () => pickElement((path, el) => {
+        if (!el) return;
+        auto.field = shortSelector(el);
+        fieldInput.value = auto.field;
+      }));
+      fieldLine.append(fieldInput, fieldPick);
+      fieldLabel.appendChild(fieldLine);
+      autoBox.appendChild(fieldLabel);
+
+      const blockLabel = h('label', null, 'Никогда не подставлять эти шаги (id через запятую)');
+      blockLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:12px;';
+      const blockInput = h('input');
+      blockInput.type = 'text';
+      blockInput.value = auto.blocked || '';
+      blockInput.placeholder = 'refund, escalate';
+      blockInput.style.marginTop = '4px';
+      blockLabel.appendChild(blockInput);
+      autoBox.appendChild(blockLabel);
+
+      const autoPreview = h('div', 'pval');
+      autoPreview.style.marginTop = '8px';
+      autoBox.appendChild(autoPreview);
+      body.appendChild(autoBox);
+
+      const refreshAuto = () => {
+        const steps = parsePlaybook(ai.playbook);
+        if (!steps.length) { autoPreview.textContent = 'Сценарий пуст — подставлять нечего.'; return; }
+        const ready = steps.filter((step) => autoDecision(step.id, auto).allowed);
+        const soon = steps.filter((step) => autoDecision(step.id,
+          Object.assign({}, auto, { enabled: true })).allowed);
+        if (ready.length) {
+          autoPreview.textContent = 'Сейчас подставляются сами: ' + ready.map((step) => step.id).join(', ');
+        } else if (soon.length) {
+          autoPreview.textContent = 'Статистику набрали: ' + soon.map((step) => step.id).join(', ') +
+            ' — включите галочку выше, чтобы их подставляло.';
+        } else {
+          autoPreview.textContent = 'Пока ни один шаг не набрал статистику — автоматика ничего не сделает.';
+        }
+      };
+
+      autoOnBox.addEventListener('change', () => { auto.enabled = autoOnBox.checked; refreshAuto(); });
+      autoOpenBox.addEventListener('change', () => { auto.onOpen = autoOpenBox.checked; });
+      minInput.addEventListener('input', () => { auto.minDecided = parseNumber(minInput.value); refreshAuto(); });
+      daysInput.addEventListener('input', () => { auto.days = parseNumber(daysInput.value); refreshAuto(); });
+      shareInput.addEventListener('input', () => {
+        const percent = parseNumber(shareInput.value);
+        auto.minShare = percent ? percent / 100 : DEFAULT_AUTO.minShare;
+        refreshAuto();
+      });
+      fieldInput.addEventListener('input', () => { auto.field = fieldInput.value.trim(); });
+      blockInput.addEventListener('input', () => { auto.blocked = blockInput.value; refreshAuto(); });
+      bookArea.addEventListener('input', refreshAuto);
+      refreshAuto();
+
       const logLine = h('div', 'line');
       logLine.style.marginTop = '14px';
       const log = loadLog();
-      const accepted = log.filter((entry) => entry.source === 'accepted').length;
+      const accepted = log.filter((entry) => entry.accepted).length;
+      const byAuto = log.filter((entry) => entry.accepted && entry.auto).length;
       const logInfo = h('span', 'pval');
-      logInfo.textContent = 'В журнале решений: ' + log.length + ' (вставлено оператором: ' + accepted + ')';
+      logInfo.textContent = 'В журнале решений: ' + log.length + ' · принято: ' + accepted +
+        (byAuto ? ', из них подставлено само: ' + byAuto : '');
       const save = h('button', null, 'Скачать журнал');
       save.title = 'JSON с предложенными шагами — пригодится, чтобы обучать подсказки на своих случаях';
       save.addEventListener('click', () => {
@@ -3645,6 +3784,154 @@
     return 'ПОПРАВКИ ОПЕРАТОРА (их нарушать нельзя):\n' + lines.join('\n');
   }
 
+  // ---------- Автоматика по накопленной точности ----------
+
+  function autoConfig(override) {
+    return Object.assign({}, DEFAULT_AUTO, (config.ai && config.ai.auto) || {}, override || {});
+  }
+
+  /** Статистика одного шага за период: предложено, принято, отклонено. */
+  function stepStats(stepId, days) {
+    const since = days ? Date.now() - days * 86400000 : 0;
+    const rows = loadLog().filter((entry) => entry.step === stepId && entry.ts >= since && !entry.invalid);
+    const accepted = rows.filter((entry) => entry.accepted).length;
+    const dismissed = rows.filter((entry) => entry.dismissed && !entry.accepted).length;
+    const decided = accepted + dismissed;
+    return {
+      offered: rows.length,
+      accepted: accepted,
+      dismissed: dismissed,
+      decided: decided,
+      share: decided ? accepted / decided : null
+    };
+  }
+
+  /**
+   * Можно ли подставлять шаг без спроса.
+   * Доля считается от решённых случаев: принято ÷ (принято + отклонено).
+   * Предложения, на которые оператор не отреагировал, в долю не идут — иначе она врёт.
+   */
+  function autoDecision(stepId, override) {
+    const auto = autoConfig(override);
+    const stats = stepStats(stepId, Number(auto.days) || 0);
+    const minDecided = Math.max(1, Number(auto.minDecided) || 10);
+    const minShare = Math.min(1, Math.max(0.5, Number(auto.minShare) || 0.85));
+    const blocked = String(auto.blocked || '').split(',').map((id) => id.trim()).filter(Boolean);
+
+    if (!auto.enabled) return { allowed: false, reason: 'автоматика выключена', stats: stats };
+    if (blocked.indexOf(stepId) !== -1) return { allowed: false, reason: 'шаг в стоп-листе', stats: stats };
+    if (stats.decided < minDecided) {
+      return { allowed: false, reason: 'мало решений: ' + stats.decided + ' из ' + minDecided, stats: stats };
+    }
+    if (stats.share == null || stats.share < minShare) {
+      return { allowed: false, reason: 'доля ниже порога', stats: stats };
+    }
+    return { allowed: true, reason: 'доля ' + Math.round(stats.share * 100) + '% на ' + stats.decided + ' решениях',
+             stats: stats };
+  }
+
+  /** Короткий человекочитаемый статус шага для вкладки «Точность». */
+  function autoStatus(stepId, override) {
+    const decision = autoDecision(stepId, override);
+    const auto = autoConfig(override);
+    const stats = decision.stats;
+    const base = { decided: stats.decided, accepted: stats.accepted, share: stats.share };
+    const minDecided = Math.max(1, Number(auto.minDecided) || 10);
+
+    if (decision.allowed) return Object.assign({ text: 'готов · ' + decision.reason, className: 'good-cell' }, base);
+    if (!auto.enabled) {
+      const ready = Object.assign({}, auto, { enabled: true });
+      const text = autoDecision(stepId, ready).allowed ? 'выключена (шаг готов)' : 'выключена';
+      return Object.assign({ text: text, className: '' }, base);
+    }
+    if (stats.decided < minDecided) {
+      return Object.assign({ text: 'учится, ещё ' + (minDecided - stats.decided), className: '' }, base);
+    }
+    return Object.assign({ text: 'низкая доля: ' + Math.round((stats.share || 0) * 100) + '%',
+                           className: 'bad-cell' }, base);
+  }
+
+  /** Текст, который нельзя подставить молча: он спросит оператора. */
+  function needsOperator(text) {
+    return /\{(?:ask|спросить)\s*:/i.test(String(text == null ? '' : text));
+  }
+
+  /**
+   * Поле ответа для автоподстановки. Сначала селектор из настроек, потом поле под курсором,
+   * и только потом — самая крупная видимая textarea на странице.
+   */
+  function findReplyField() {
+    const selector = String(autoConfig().field || '').trim();
+    if (selector) {
+      try {
+        const picked = document.querySelector(selector);
+        if (isEditable(picked)) return picked;
+      } catch (e) { /* кривой селектор — ищем дальше */ }
+    }
+    const target = resolveTarget();
+    if (target) return target;
+
+    let best = null;
+    let bestArea = 0;
+    Array.prototype.forEach.call(document.querySelectorAll('textarea'), (el) => {
+      if (!isEditable(el)) return;
+      const box = el.getBoundingClientRect();
+      const area = box.width * box.height;
+      if (area > bestArea) { bestArea = area; best = el; }
+    });
+    return bestArea >= 2000 ? best : null;                 // крошечные поля поиска не в счёт
+  }
+
+  /**
+   * Почему молчаливая подстановка сейчас невозможна. Пустая строка — можно.
+   * Правила короткие и не обсуждаются: только в пустое поле и только готовым текстом.
+   */
+  function autoBlockedReason(text, field) {
+    if (!field) return 'не нашли поле ответа';
+    if (String(readContent(field) || '').trim()) return 'в поле уже есть черновик';
+    if (needsOperator(text)) return 'в тексте есть {ask:…}';
+    return '';
+  }
+
+  /** Подставляет текст в поле. Возвращает вставленное или null, если оператор отменил. */
+  async function autoInsert(text, field) {
+    const filled = await expandPlaceholders(text, field, '');
+    if (filled === null) return null;
+    insertTemplateText(field, filled);
+    return filled;
+  }
+
+  let autoOpenKey = '';
+
+  /**
+   * Одна попытка подставить ответ при открытии тикета — только по правилу, без обращения к модели.
+   * Модель на открытии не спрашиваем: это деньги и задержка на каждом тикете.
+   */
+  async function autoOnOpen() {
+    const auto = autoConfig();
+    if (!auto.enabled || !auto.onOpen) return;
+    const conf = aiConfig();
+    if (!conf.enabled || !siteMatches(panelConfig().site)) return;
+
+    const key = ticketKey(location.href);
+    if (!key || key === autoOpenKey) return;               // один тикет — одна попытка
+    autoOpenKey = key;
+
+    const step = matchPlaybookRule(parsePlaybook(conf.playbook), aiPageText());
+    if (!step) return;
+    const decision = autoDecision(step.id);
+    if (!decision.allowed) return;
+
+    const field = findReplyField();
+    if (autoBlockedReason(step.text, field)) return;
+
+    const logId = logDecision({ step: step.id, source: 'rule', auto: true, offer: String(step.text).slice(0, 400) });
+    const filled = await autoInsert(step.text, field);
+    if (filled === null) return;
+    logUpdate(logId, { accepted: true, auto: true, final: filled.slice(0, 400) });
+    toast('Шаг «' + step.title + '» вставлен автоматически — проверьте и отправьте');
+  }
+
   // ---------- Сценарий разбирательства ----------
 
   /**
@@ -3770,7 +4057,8 @@
    */
   function logStats(days, groupBy) {
     const since = days ? Date.now() - days * 86400000 : 0;
-    const rows = loadLog().filter((entry) => entry.ts >= since && entry.step !== undefined || entry.task !== undefined);
+    const rows = loadLog().filter((entry) =>
+      entry.ts >= since && (entry.step !== undefined || entry.task !== undefined));
     const map = new Map();
     rows.forEach((entry) => {
       if (entry.source === 'accepted') return;            // старый формат: отдельная запись о вставке
@@ -3938,7 +4226,7 @@
     const byRule = matchPlaybookRule(steps, context.chat);
     if (byRule) {
       const logId = logDecision({ step: byRule.id, source: 'rule', offer: String(byRule.text || '').slice(0, 400) });
-      showStepWindow(byRule, {
+      await offerStep(byRule, {
         logId: logId,
         source: 'по правилу «' + byRule.rule + '» — модель не спрашивали',
         why: byRule.when || '',
@@ -3985,7 +4273,7 @@
         return;
       }
       const logId = logDecision({ step: step.id, source: 'model', offer: String(data.reply || step.text).slice(0, 400) });
-      showStepWindow(step, {
+      await offerStep(step, {
         logId: logId,
         source: 'выбрала модель',
         why: String(data.why || step.when || ''),
@@ -4000,8 +4288,33 @@
     }
   }
 
+  /**
+   * Показать шаг оператору — или подставить молча, если этот шаг уже заслужил доверие.
+   * Порог считается по журналу: см. autoDecision. Отправку не делаем никогда.
+   */
+  async function offerStep(step, info) {
+    const decision = autoDecision(step.id);
+    if (decision.allowed) {
+      const field = findReplyField();
+      const blocked = autoBlockedReason(info.text, field);
+      if (!blocked) {
+        closeOverlay();                                      // окно ожидания больше не нужно
+        const filled = await autoInsert(info.text, field);
+        if (filled !== null) {
+          logUpdate(info.logId, { accepted: true, auto: true, final: filled.slice(0, 400) });
+          toast('Вставлено автоматически — ' + decision.reason + '. Проверьте и отправьте');
+          return;
+        }
+      } else {
+        info.auto = 'автоподстановка пропущена: ' + blocked;
+      }
+    }
+    showStepWindow(step, info);
+  }
+
   function showStepWindow(step, info) {
     const overlay = createOverlay();
+    pendingOffer = info && info.logId ? info.logId : null;   // закроют не глядя — запишем отказ
     const panel = h('div', 'panel');
     overlay.appendChild(panel);
 
@@ -4038,6 +4351,7 @@
       row('Источник', info.source || '');
       row('Почему', info.why || '');
       row('Ждём дальше', info.wait || '');
+      row('Автоматика', info.auto || '');
       body.appendChild(meta);
 
       const area = h('textarea');
@@ -4074,6 +4388,7 @@
         paste.addEventListener('click', async () => {
           const text = await expandPlaceholders(info.area.value, target, '');   // {ask:…} спросит здесь
           if (text === null) return;
+          pendingOffer = null;                                 // воспользовались — отказом не считаем
           closeOverlay();
           insertTemplateText(target, text);
           logUpdate(info.logId, {
@@ -4094,6 +4409,7 @@
 
   function showAiWindow(task, result) {
     const overlay = createOverlay();
+    pendingOffer = result && result.logId ? result.logId : null;
     const panel = h('div', 'panel');
     overlay.appendChild(panel);
 
@@ -4162,6 +4478,7 @@
         const paste = h('button', 'primary', replaces ? 'Заменить в поле' : 'Вставить в поле');
         paste.addEventListener('click', () => {
           const text = insertText();
+          pendingOffer = null;                                 // воспользовались — отказом не считаем
           closeOverlay();
           if (replaces) selectAllIn(target);
           insertTemplateText(target, text);
@@ -4275,8 +4592,11 @@
   /** Ряд кнопок ИИ в шапке боковой панели. */
   function aiButtons() {
     const row = h('div', 'ai-row');
-    const next = h('button', 'icon', '▶');
-    next.title = 'Следующий шаг разбирательства';
+    const auto = autoConfig();
+    const next = h('button', 'icon', auto.enabled ? '▶▶' : '▶');
+    next.title = auto.enabled
+      ? 'Следующий шаг разбирательства. Проверенные шаги вставятся сами — отправка всё равно за вами'
+      : 'Следующий шаг разбирательства';
     next.addEventListener('click', () => runNextStep());
     row.appendChild(next);
     Object.keys(AI_TASKS).forEach((taskId) => {
@@ -5208,7 +5528,9 @@
       const hint = h('p', 'hint');
       hint.innerHTML = 'Считается по журналу предложений. <b>Предложено</b> — сколько раз скрипт или модель ' +
         'что-то предложили, <b>принято</b> — сколько из них вы вставили в поле, <b>с правкой</b> — вставили, ' +
-        'но переписав текст. <b>Доля</b> = принято ÷ предложено. Пока доля низкая — автоматике доверять рано.';
+        'но переписав текст. <b>Доля</b> = принято ÷ предложено. Столбец <b>Автоматика</b> показывает, ' +
+        'дорос ли шаг до молчаливой подстановки: там доля считается строже — только по тем предложениям, ' +
+        'на которые вы ответили (вставили или закрыли окно), а пороги задаются на вкладке «ИИ».';
       body.appendChild(hint);
 
       const line = h('div', 'line');
@@ -5251,6 +5573,7 @@
 
       function draw() {
         holder.textContent = '';
+        const stepIds = parsePlaybook(aiConfig().playbook).map((step) => step.id);
         const stats = logStats(state.days, state.group);
         const totals = stats.reduce((acc, item) => {
           acc.offered += item.offered;
@@ -5274,6 +5597,7 @@
          ['Принято', 'Сколько раз вы вставили предложенное в поле'],
          ['С правкой', 'Из принятых — сколько вы переписали перед вставкой'],
          ['Доля', 'Принято ÷ предложено'],
+         ['Автоматика', 'Может ли скрипт подставлять этот шаг сам, без окна с подтверждением'],
          ['По правилу', 'Сколько предложено правилом, без обращения к модели'],
          ['Вне сценария', 'Сколько раз модель предложила шаг, которого нет в сценарии']].forEach((pair) => {
           const cell = h('th', null, pair[0]);
@@ -5292,6 +5616,18 @@
             Math.round(item.share * 100) + '%');
           if (item.offered >= 5 && item.share < 0.5) share.className = 'bad-cell';
           tr.appendChild(share);
+
+          // автоматика бывает только у шагов сценария: задачам ИИ («вычитать», «риски») её не даём
+          const auto = h('td', null, '—');
+          auto.title = 'Автоподстановка работает только для шагов сценария';
+          if (state.group === 'step' && stepIds.indexOf(item.key) !== -1) {
+            const status = autoStatus(item.key);
+            auto.textContent = status.text;
+            auto.className = status.className;
+            auto.title = 'Решений: ' + status.decided + ', принято: ' + status.accepted;
+          }
+          tr.appendChild(auto);
+
           tr.appendChild(h('td', null, String(item.rules)));
           tr.appendChild(h('td', null, String(item.invalid)));
           table.appendChild(tr);
@@ -5711,11 +6047,15 @@
   ensureFab();
   updateSidePanel();
   startWatchers();
-  if (window.top === window.self) watchUrlChanges(updateSidePanel);
+  if (window.top === window.self) {
+    watchUrlChanges(() => { updateSidePanel(); setTimeout(autoOnOpen, 1200); });
+    setTimeout(autoOnOpen, 1500);                          // страница успевает дорисовать переписку
+  }
 
   if (window.top === window.self && typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('Настроить автоответы', () => openSettings());
     GM_registerMenuCommand('Показать список автоответов', () => openPicker());
     GM_registerMenuCommand('Очередь тикетов', () => openQueue());
+    GM_registerMenuCommand('Следующий шаг по тикету', () => runNextStep());
   }
 })();
