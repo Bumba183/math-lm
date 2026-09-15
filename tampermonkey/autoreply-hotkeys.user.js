@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      3.0.1
+// @version      3.1.0
 // @description  Рабочее место оператора: автоответы, панель данных заказа, очередь с конвейером по неотвеченным, решение по тикету (вердикт, анкета, риск по формуле), теневой режим для накопления точности, стоп-слова, статистика по курьерам и помощник на модели.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -67,6 +67,8 @@
     limitDays: 7,                      // сколько дней товар считается свежим
     hideEmpty: true,                   // не показывать строки, для которых на странице нет данных
     compact: true,                     // не повторять числа, которые уже видны в строке с долей
+    quick: true,                       // блок «Быстрые действия» — шаги сценария кнопками
+    macros: true,                      // блок «Макросы» — автоответы карточками
     packs: { url: '~/product-packing/list/', column: 'Товар', selector: '', values: [], counted: [] },
     // приоритет безопасности по типу позиции: 1 — самый ненадёжный, 5 — самый безопасный
     stash: { url: '', column: 'Тип', selector: '', values: [], ranks: {} },
@@ -395,7 +397,28 @@
     }
   }
 
+  /**
+   * Правка одного ключа настроек. Читает сохранённое заново и применяет изменение к нему,
+   * а не к своей копии в памяти: иначе вкладка, открытая час назад, затирает свёрнутой
+   * панелью или перетащенной кнопкой все автоответы, добавленные в соседней вкладке.
+   */
+  function patchConfig(patch) {
+    const fresh = loadConfig();
+    const change = typeof patch === 'function' ? patch(fresh) : patch;
+    config = Object.assign({}, fresh, change || {});
+    return saveConfig(config);
+  }
+
   let config = loadConfig();
+
+  // соседняя вкладка что-то сохранила — подхватываем, чтобы не работать со старой копией
+  window.addEventListener('storage', (event) => {
+    if (event.key !== STORE_KEY || openOverlay) return;   // при открытых настройках не дёргаем из-под рук
+    config = loadConfig();
+    reloadTemplates();
+    hotkeyCache.clear();
+    updateSidePanel();
+  });
   let templates = [];   // разобранные автоответы
   let problems = [];    // замечания парсера (показываются в настройках)
 
@@ -1177,6 +1200,14 @@
     '.side-alarm .side-value { color: #b3261e; }',
     '.side-empty { padding: 10px 6px; color: #5b6273; }',
     '.side-note { padding: 7px 12px; font-size: 11px; color: #5b6273; background: #eef1f7; }',
+    '.quick-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 6px 8px; }',
+    'button.quick { font-size: 11px; padding: 6px 7px; text-align: left; white-space: normal; line-height: 1.25; }',
+    '.macro { padding: 6px 10px; border-top: 1px solid #eceef2; cursor: pointer; }',
+    '.macro:hover { background: #f2f4f9; }',
+    '.macro-top { display: flex; gap: 6px; align-items: baseline; }',
+    '.macro-key { font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #2f6fed; }',
+    '.macro-name { font-size: 11px; color: #5b6273; }',
+    '.macro-text { font-size: 11px; color: #6b7280; margin-top: 2px; }',
     '.pick-box { position: fixed; pointer-events: none; border: 2px solid #2f6df6; border-radius: 4px;',
     '  background: rgba(47, 109, 246, .12); }',
     '.pick-bar { position: fixed; left: 50%; top: 14px; transform: translateX(-50%); padding: 8px 14px;',
@@ -1207,6 +1238,10 @@
     '  .side-row:hover { background: #262c38; }',
     '  .side-label, .side-empty { color: #a3abbd; }',
     '  .side-note { background: #262c38; color: #a3abbd; }',
+    '  .macro { border-color: #313745; }',
+    '  .macro:hover { background: #262c38; }',
+    '  .macro-key { color: #8ab4ff; }',
+    '  .macro-name, .macro-text { color: #a3abbd; }',
     '  .side-dim { color: #6f7891; }',
     '  .side-alarm { background: rgba(122, 48, 48, .4); }',
     '  .side-alarm .side-value { color: #ff9a90; }',
@@ -1336,8 +1371,7 @@
         try { fab.releasePointerCapture(e.pointerId); } catch (err) {}
         if (!moved) { openPicker(); return; }
         const rect = fab.getBoundingClientRect();
-        config.fabPos = { x: Math.round(rect.left), y: Math.round(rect.top) };
-        saveConfig(config);
+        patchConfig({ fabPos: { x: Math.round(rect.left), y: Math.round(rect.top) } });
       });
       fab.addEventListener('pointercancel', () => { drag = null; });
       fab.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); });
@@ -1405,6 +1439,7 @@
   const PLACEHOLDERS = ['{cursor}', '{selection}', '{clipboard}', '{date}', '{time}', '{url}', '{title}', '{ask:Вопрос}'];
 
   function openSettings(initialTab) {
+    config = loadConfig();                               // вдруг соседняя вкладка что-то поменяла
     const overlay = createOverlay();
     const panel = h('div', 'panel');
     overlay.appendChild(panel);
@@ -1677,6 +1712,25 @@
       hideBox.addEventListener('change', () => { side.hideEmpty = hideBox.checked; });
       hideLabel.append(hideBox, document.createTextNode('Скрывать строки, для которых на странице нет данных'));
       body.appendChild(hideLabel);
+
+      const quickLabel = h('label', 'check');
+      quickLabel.style.marginTop = '6px';
+      const quickBox = h('input');
+      quickBox.type = 'checkbox';
+      quickBox.checked = side.quick !== false;
+      quickBox.addEventListener('change', () => { side.quick = quickBox.checked; });
+      quickLabel.append(quickBox,
+        document.createTextNode('Блок «Быстрые действия»: шаги сценария кнопками'));
+      body.appendChild(quickLabel);
+
+      const macroLabel = h('label', 'check');
+      macroLabel.style.marginTop = '6px';
+      const macroBox = h('input');
+      macroBox.type = 'checkbox';
+      macroBox.checked = side.macros !== false;
+      macroBox.addEventListener('change', () => { side.macros = macroBox.checked; });
+      macroLabel.append(macroBox, document.createTextNode('Блок «Макросы»: автоответы карточками'));
+      body.appendChild(macroLabel);
 
       const foldLabel = h('label', 'check');
       foldLabel.style.marginTop = '6px';
@@ -2958,7 +3012,8 @@
         }
       }
 
-      config = Object.assign({}, config, {
+      // поверх сохранённого, а не поверх своей копии: настройки из соседней вкладки не теряются
+      config = Object.assign({}, loadConfig(), {
         text: serializeTemplates(draft),
         pickerHotkey: picker,
         settingsHotkey: settings,
@@ -3632,8 +3687,9 @@
     const fold = h('button', 'icon side-fold', '–');
     fold.title = 'Свернуть';
     fold.addEventListener('click', () => {
-      config.panel = Object.assign({}, panelConfig(), { collapsed: !panelConfig().collapsed });
-      saveConfig(config);
+      patchConfig((fresh) => ({
+        panel: Object.assign({}, DEFAULT_PANEL, fresh.panel || {}, { collapsed: !panelConfig().collapsed })
+      }));
       side.classList.toggle('folded', !!config.panel.collapsed);
       fold.textContent = config.panel.collapsed ? '+' : '–';
     });
@@ -3745,6 +3801,65 @@
     if (topCourier) rows.push({ label: 'Чаще всех курьер', value: topCourier[0] + ' — ' + topCourier[1] });
 
     return { rows: rows, waiting: waiting, rule: rule, total: total };
+  }
+
+  /**
+   * Быстрые действия: шаги сценария кнопками. Клик вставляет текст шага в поле —
+   * без модели и без подтверждения, но и без отправки: отправляете вы.
+   */
+  function quickBlock() {
+    const conf = aiConfig();
+    const steps = parsePlaybook(conf.playbook).filter((step) => String(step.text || '').trim());
+    if (!steps.length) return null;
+
+    const box = h('div');
+    const head = h('div', 'side-note');
+    head.textContent = '⚡ Быстрые действия';
+    head.title = 'Шаги сценария. Клик вставляет текст шага в поле ответа';
+    box.appendChild(head);
+
+    const grid = h('div', 'quick-grid');
+    steps.forEach((step) => {
+      const button = h('button', 'quick', step.title || step.id);
+      button.title = String(step.text || '').slice(0, 200);
+      button.addEventListener('click', async () => {
+        const field = findReplyField();
+        if (!field) { toast('Нет поля ответа на этой странице'); return; }
+        const text = await expandPlaceholders(step.text, field, '');
+        if (text === null) return;
+        insertTemplateText(field, text);
+        logDecision({ step: step.id, source: 'quick', accepted: true, offer: String(step.text).slice(0, 400) });
+        toast('Вставлено: ' + (step.title || step.id) + ' — проверьте и отправьте');
+      });
+      grid.appendChild(button);
+    });
+    box.appendChild(grid);
+    return box;
+  }
+
+  /** Макросы: автоответы карточками с началом текста. */
+  function macroBlock() {
+    if (!templates.length) return null;
+    const box = h('div');
+    const head = h('div', 'side-note');
+    head.textContent = '📋 Макросы';
+    head.title = 'Автоответы: клик вставляет текст. ⏎ рядом с триггером — такой автоответ ещё и отправляет';
+    box.appendChild(head);
+
+    templates.slice(0, 20).forEach((item) => {
+      const card = h('div', 'macro');
+      const top = h('div', 'macro-top');
+      top.append(h('span', 'macro-key', item.trigger || item.hotkey || item.label),
+                 h('span', 'macro-name', item.label + (item.send ? ' ⏎' : '')));
+      const preview = h('div', 'macro-text');
+      preview.textContent = String(item.text || '').replace(/\s+/g, ' ').slice(0, 90) +
+        (String(item.text || '').length > 90 ? '…' : '');
+      card.append(top, preview);
+      card.title = item.send ? 'Вставит текст и отправит' : 'Вставит текст в поле ответа';
+      card.addEventListener('click', () => applyTemplate(item, findReplyField()));
+      box.appendChild(card);
+    });
+    return box;
   }
 
   /** Список тикетов, где ждут нашего ответа: кликом открывается тикет. */
@@ -3912,6 +4027,17 @@
         refreshWaiting();
       }
     }
+    if (!summary) {
+      if (panel.quick !== false && aiConfig().enabled) {
+        const quick = quickBlock();
+        if (quick) body.appendChild(quick);
+      }
+      if (panel.macros !== false) {
+        const macros = macroBlock();
+        if (macros) body.appendChild(macros);
+      }
+    }
+
     // заметка и напоминание — про конкретный тикет, на списке их не показываем
     if (queueConfig().enabled && !summary) body.appendChild(noteBlock());
   }
@@ -7800,10 +7926,11 @@
           text: candidate.text
         }));
 
-        const ai = Object.assign({}, DEFAULT_AI, config.ai || {});
-        ai.playbook = String(ai.playbook || '').trim() + '\n\n' + stepsToPlaybook(steps);
-        config = Object.assign({}, config, { ai: ai });
-        saveConfig(config);
+        patchConfig((fresh) => {
+          const ai = Object.assign({}, DEFAULT_AI, fresh.ai || {});
+          ai.playbook = String(ai.playbook || '').trim() + '\n\n' + stepsToPlaybook(steps);
+          return { ai: ai };
+        });
 
         const memory = loadMemory();
         picked.forEach((candidate) => {
