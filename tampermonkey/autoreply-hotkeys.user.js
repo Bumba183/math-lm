@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      3.1.0
+// @version      3.1.1
 // @description  Рабочее место оператора: автоответы, панель данных заказа, очередь с конвейером по неотвеченным, решение по тикету (вердикт, анкета, риск по формуле), теневой режим для накопления точности, стоп-слова, статистика по курьерам и помощник на модели.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -23,6 +23,7 @@
 
   // ========================== 1. КОНФИГУРАЦИЯ ==========================
 
+  const SCRIPT_VERSION = '3.1.1';
   const STORE_KEY = 'arh.config.v1';
   const LOG_KEY = 'arh.log.v1';
   const NOTES_KEY = 'arh.notes.v1';
@@ -1481,10 +1482,13 @@
     const foot = h('div', 'foot');
     const count = h('span', 'hint');
     count.style.margin = '0';
+    const version = h('span', 'pval');
+    version.textContent = 'v' + SCRIPT_VERSION;
+    version.title = 'Версия скрипта. Если она не та, что вы ставили, — обновление не применилось';
     const resetBtn = h('button', null, 'Вернуть примеры');
     const cancelBtn = h('button', null, 'Отмена');
     const saveBtn = h('button', 'primary', 'Сохранить');
-    foot.append(count, h('span', 'spacer'), resetBtn, cancelBtn, saveBtn);
+    foot.append(count, version, h('span', 'spacer'), resetBtn, cancelBtn, saveBtn);
     panel.appendChild(foot);
 
     let active = initialTab || 'list';
@@ -3809,7 +3813,8 @@
    */
   function quickBlock() {
     const conf = aiConfig();
-    const steps = parsePlaybook(conf.playbook).filter((step) => String(step.text || '').trim());
+    const steps = parsePlaybook(conf.playbook)
+      .filter((step) => step.quick !== false && String(step.text || '').trim());
     if (!steps.length) return null;
 
     const box = h('div');
@@ -4028,7 +4033,7 @@
       }
     }
     if (!summary) {
-      if (panel.quick !== false && aiConfig().enabled) {
+      if (panel.quick !== false) {                     // вставка шага не требует модели
         const quick = quickBlock();
         if (quick) body.appendChild(quick);
       }
@@ -4999,16 +5004,17 @@
         current = {
           id: (parts[0] || '').replace(/\s+/g, '_'),
           title: parts[1] || parts[0] || '',
-          rule: '', when: '', wait: '', lines: []
+          rule: '', when: '', wait: '', quick: true, lines: []
         };
         return;
       }
       if (!current) return;
-      const field = /^\s*(если|когда|ждём|ждем)\s*:\s*(.*)$/i.exec(line);
+      const field = /^\s*(если|когда|ждём|ждем|быстро)\s*:\s*(.*)$/i.exec(line);
       if (field && !current.lines.length) {
         const key = field[1].toLowerCase();
         if (key === 'если') current.rule = field[2].trim();
         else if (key === 'когда') current.when = field[2].trim();
+        else if (key === 'быстро') current.quick = !/^нет|^no|^off/i.test(field[2].trim());
         else current.wait = field[2].trim();
         return;
       }
