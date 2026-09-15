@@ -2,7 +2,7 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      3.0.0
+// @version      3.0.1
 // @description  Рабочее место оператора: автоответы, панель данных заказа, очередь с конвейером по неотвеченным, решение по тикету (вердикт, анкета, риск по формуле), теневой режим для накопления точности, стоп-слова, статистика по курьерам и помощник на модели.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
@@ -4400,16 +4400,20 @@
 
   function guessChatRoot(doc, minKids) {
     const scope = doc || document;
-    const least = Math.max(2, Number(minKids) || 3);
+    // двух реплик достаточно: в тикете часто всего вопрос и ответ
+    const least = Math.max(2, Number(minKids) || 2);
     let best = null;
     let bestScore = 0;
     let nodes = [];
-    try { nodes = Array.prototype.slice.call(scope.querySelectorAll('div, ul, ol, section, tbody')); }
+    // таблицы в кандидаты не берём: строки «подпись — значение» выглядят как однотипные
+    // сообщения с датами и легко перебивают настоящий диалог из двух реплик
+    try { nodes = Array.prototype.slice.call(scope.querySelectorAll('div, ul, ol, section')); }
     catch (e) { return null; }
 
     nodes.forEach((node) => {
       if (rootEl && node.getRootNode && node.getRootNode() === rootEl) return;   // наша же панель
       if (node.matches && node.matches(PAGE_NOISE)) return;
+      if (node.closest && node.closest('table')) return;                         // ячейки таблицы — не диалог
       const kids = Array.prototype.filter.call(node.children || [], (kid) => nodeText(kid).length >= 25);
       if (kids.length < least) return;
 
