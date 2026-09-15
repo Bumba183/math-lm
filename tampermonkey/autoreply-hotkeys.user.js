@@ -2,8 +2,8 @@
 // @name         Автоответы по горячим клавишам
 // @name:en      Auto-Reply Hotkeys
 // @namespace    https://github.com/bumba183/math-lm
-// @version      2.10.0
-// @description  Рабочее место оператора: автоответы по триггеру и хоткеям, панель со сведениями о заказе и статистикой покупателя, очередь тикетов с фильтрами, заметки с напоминаниями, статистика по курьерам, оценка риска по формуле, разбор фото клада и помощник на модели.
+// @version      3.0.0
+// @description  Рабочее место оператора: автоответы, панель данных заказа, очередь с конвейером по неотвеченным, решение по тикету (вердикт, анкета, риск по формуле), теневой режим для накопления точности, стоп-слова, статистика по курьерам и помощник на модели.
 // @description:en  Insert canned replies into the focused input field with a text trigger or a hotkey.
 // @author       -
 // @license      MIT
@@ -126,6 +126,8 @@
     minShare: 0.85,
     days: 60,
     onOpen: false,
+    shadow: true,                      // решать молча и сверять с тем, что отправил оператор
+    shadowModel: false,                // в теневом режиме спрашивать и модель (это деньги за каждый тикет)
     field: '',
     blocked: ''
   };
@@ -145,6 +147,40 @@
     'Прислал фото места | фото прилагаю, на фото, прикладываю фото, скину фото | -8'
   ].join('\n');
 
+  // Слова, после которых автоматика выключается на тикете целиком
+  const DEFAULT_STOP = 'полиция, юрист, адвокат, суд, иск, прокуратура, роспотребнадзор, чарджбэк, чарджбек, ' +
+    'chargeback, жалоба на площадку, жалоба в поддержку, напишу отзыв везде, угрожаю, мошенник';
+
+  /**
+   * Анкета: что покупатель обязан сообщить. Формат строки:
+   *   Пункт | слова, по которым видно, что он на него ответил
+   * Пункт без слов проверяется только моделью.
+   */
+  const DEFAULT_FORM = [
+    '# Обязательные пункты анкеты. Название | слова-признаки ответа.',
+    'Время поиска | во сколько, в час, утром, днем, вечером, ночью, примерно в',
+    'Освещение | светло, темно, фонар, солнце, сумерки, день был',
+    'Фото места | фото, снимок, скрин, прикладываю, прилагаю, на фотографии',
+    'Что нашли на месте | перекопан, трава, камни, ничего не было, следы, ямка',
+    'Сколько искали | минут, час, полчаса, искал долго',
+    'Кто искал | один, вдвоем, втроем, с другом, сам'
+  ].join('\n');
+
+  /**
+   * Вердикты — чем тикет закрывается. Формат строки:
+   *   [id | Название] деньги: да/нет | риск: 0-39 | анкета: полная/неполная/любая
+   * Порядок важен: берётся первый подходящий сверху. «деньги: да» — только вручную.
+   */
+  const DEFAULT_VERDICTS = [
+    '# Решения по тикету. Первый подходящий сверху — рекомендуемый.',
+    '# «деньги: да» скрипт не подставляет никогда, сколько бы точности ни накопилось.',
+    '',
+    '[ask_form | Дозапросить анкету] деньги: нет | риск: 0-100 | анкета: неполная',
+    '[repeat_search | Повторный поиск] деньги: нет | риск: 0-59 | анкета: полная',
+    '[replace | Замена] деньги: да | риск: 0-29 | анкета: полная',
+    '[reject | Отказ] деньги: нет | риск: 60-100 | анкета: полная'
+  ].join('\n');
+
   const DEFAULT_AI = {
     enabled: false,
     base: 'https://api.aitunnel.ru/v1',
@@ -157,6 +193,9 @@
     tone: 'Вежливо, по-деловому, на «вы», без канцелярита и лишних извинений.',
     ruleFirst: false,                  // правила только подсказывают: решает модель, прочитав переписку
     signals: DEFAULT_SIGNALS,          // сигналы переписки для оценки риска
+    stopWords: DEFAULT_STOP,           // после них автоматика молчит
+    form: DEFAULT_FORM,                // обязательные пункты анкеты
+    verdicts: DEFAULT_VERDICTS,        // чем тикет закрывается
     auto: DEFAULT_AUTO,
     playbook: [
       '# Шаги разбирательства. «если» — слова-правило (сработает без модели),',
@@ -913,6 +952,18 @@
       return;
     }
     if (openOverlay && e.composedPath && e.composedPath().indexOf(openOverlay) !== -1) return; // печатают в нашей панели
+
+    // конвейер: Alt+стрелки ведут по списку неотвеченных
+    if (e.altKey && !e.ctrlKey && !e.metaKey && (e.code === 'ArrowRight' || e.code === 'ArrowLeft')) {
+      const line = loadLine();
+      if (line.items.length && lineSpot(line) !== -1) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        lineGo(e.code === 'ArrowRight' ? 1 : -1);
+        return;
+      }
+    }
+
     if (!e.ctrlKey && !e.altKey && !e.metaKey && !SAFE_ALONE.test(e.code || '')) return;
 
     const sigs = eventSignatures(e);
@@ -2453,6 +2504,37 @@
       bookLabel.append(bookArea, bookCount);
       body.appendChild(bookLabel);
 
+      const listEditor = (title, key, fallback, count) => {
+        const label = h('label', null, title);
+        label.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:12px;';
+        const area = h('textarea', 'small');
+        area.spellcheck = false;
+        area.value = ai[key] == null ? fallback : ai[key];
+        area.style.marginTop = '4px';
+        const info = h('div', 'pval');
+        const refresh = () => { info.textContent = count(area.value); };
+        area.addEventListener('input', () => { ai[key] = area.value; refresh(); });
+        refresh();
+        label.append(area, info);
+        body.appendChild(label);
+        return area;
+      };
+
+      listEditor('Обязательные пункты анкеты: Пункт | слова-признаки ответа', 'form', DEFAULT_FORM,
+        (value) => 'Пунктов: ' + parseForm(value).length + '. Пункт без слов проверяет только модель.');
+
+      listEditor('Вердикты: [id | Название] деньги: да/нет | риск: 0-39 | анкета: полная', 'verdicts',
+        DEFAULT_VERDICTS,
+        (value) => {
+          const list = parseVerdicts(value);
+          const money = list.filter((item) => item.money).length;
+          return 'Вердиктов: ' + list.length + ', из них денежных (только вручную): ' + money +
+            '. Берётся первый подходящий сверху.';
+        });
+
+      listEditor('Стоп-слова: после них автоматика на тикете выключается', 'stopWords', DEFAULT_STOP,
+        (value) => 'Слов: ' + String(value || '').split(',').filter((word) => word.trim()).length);
+
       const signalLabel = h('label', null, 'Сигналы для оценки риска: Название | слова | баллы');
       signalLabel.style.cssText = 'display:block;font-size:12px;color:#5b6273;margin-top:12px;';
       const signalArea = h('textarea', 'small');
@@ -2618,6 +2700,27 @@
       autoOnBox.checked = !!auto.enabled;
       autoOn.append(autoOnBox, document.createTextNode('Подставлять проверенные шаги без подтверждения'));
       autoBox.appendChild(autoOn);
+
+      const shadowOn = h('label', 'check');
+      const shadowBox = h('input');
+      shadowBox.type = 'checkbox';
+      shadowBox.checked = auto.shadow !== false;
+      shadowBox.addEventListener('change', () => { auto.shadow = shadowBox.checked; });
+      shadowOn.title = 'Ничего не вставляет и не показывает: только решает молча и сверяет с тем, ' +
+        'что вы отправили. Так набирается статистика до того, как автоматике что-то доверят';
+      shadowOn.append(shadowBox,
+        document.createTextNode('Теневой режим: решать молча и сверять с вашим ответом'));
+      autoBox.appendChild(shadowOn);
+
+      const shadowAi = h('label', 'check');
+      const shadowAiBox = h('input');
+      shadowAiBox.type = 'checkbox';
+      shadowAiBox.checked = !!auto.shadowModel;
+      shadowAiBox.addEventListener('change', () => { auto.shadowModel = shadowAiBox.checked; });
+      shadowAi.title = 'Каждый тикет без совпавшего правила будет стоить одного запроса к модели';
+      shadowAi.append(shadowAiBox,
+        document.createTextNode('В теневом режиме спрашивать и модель (платно, по запросу на тикет)'));
+      autoBox.appendChild(shadowAi);
 
       const autoOpen = h('label', 'check');
       const autoOpenBox = h('input');
@@ -3671,6 +3774,15 @@
     head.title = 'Признак: ' + summary.rule.note;
     box.appendChild(head);
 
+    if (rows.length) {
+      const start = h('div', 'side-row');
+      start.style.cursor = 'pointer';
+      start.title = 'Открыть их подряд: Alt+→ — следующий, Alt+← — предыдущий';
+      start.append(h('span', 'side-label', 'Конвейер'), h('span', 'side-value', 'пройти все ' + rows.length + ' →'));
+      start.addEventListener('click', () => startLine(rows));
+      box.appendChild(start);
+    }
+
     if (!rows.length) {
       box.appendChild(h('div', 'side-empty', waitingCache.error ? 'Список не прочитан' : 'Все отвечены'));
       return box;
@@ -3768,6 +3880,9 @@
       }
       body.appendChild(row);
     });
+
+    const line = lineBlock();
+    if (line) body.appendChild(line);
 
     const summary = pageListSummary();
     const aiRow = side.querySelector('.ai-row');
@@ -4572,14 +4687,22 @@
   function stepStats(stepId, days) {
     const since = days ? Date.now() - days * 86400000 : 0;
     const rows = loadLog().filter((entry) => entry.step === stepId && entry.ts >= since && !entry.invalid);
-    const accepted = rows.filter((entry) => entry.accepted).length;
-    const dismissed = rows.filter((entry) => entry.dismissed && !entry.accepted).length;
+
+    // тихое решение засчитывается по тому, совпало ли оно с отправленным ответом
+    const yes = (entry) => (entry.shadow ? entry.matched === true : !!entry.accepted);
+    const no = (entry) => (entry.shadow ? entry.matched === false : (!!entry.dismissed && !entry.accepted));
+    const accepted = rows.filter(yes).length;
+    const dismissed = rows.filter(no).length;
     const decided = accepted + dismissed;
+    const shadow = rows.filter((entry) => entry.shadow);
     return {
       offered: rows.length,
       accepted: accepted,
       dismissed: dismissed,
       decided: decided,
+      shadow: shadow.length,
+      shadowMatched: shadow.filter((entry) => entry.matched === true).length,
+      shadowWaiting: shadow.filter((entry) => entry.matched === undefined).length,
       share: decided ? accepted / decided : null
     };
   }
@@ -4623,7 +4746,8 @@
       return Object.assign({ text: text, className: '' }, base);
     }
     if (stats.decided < minDecided) {
-      return Object.assign({ text: 'учится, ещё ' + (minDecided - stats.decided), className: '' }, base);
+      const tail = stats.shadowWaiting ? ' (тихих без ответа: ' + stats.shadowWaiting + ')' : '';
+      return Object.assign({ text: 'учится, ещё ' + (minDecided - stats.decided) + tail, className: '' }, base);
     }
     return Object.assign({ text: 'низкая доля: ' + Math.round((stats.share || 0) * 100) + '%',
                            className: 'bad-cell' }, base);
@@ -4690,6 +4814,7 @@
     if (!auto.enabled || !auto.onOpen) return;
     const conf = aiConfig();
     if (!conf.enabled || !siteMatches(panelConfig().site)) return;
+    if (stopWordHit(aiPageText())) return;                 // спорный тикет — только вручную
 
     const key = ticketKey(location.href);
     if (!key || key === autoOpenKey) return;               // один тикет — одна попытка
@@ -4835,12 +4960,12 @@
    */
   function logStats(days, groupBy) {
     const since = days ? Date.now() - days * 86400000 : 0;
-    const rows = loadLog().filter((entry) =>
-      entry.ts >= since && (entry.step !== undefined || entry.task !== undefined));
+    const rows = loadLog().filter((entry) => entry.ts >= since && !entry.shadow &&
+      (entry.step !== undefined || entry.task !== undefined || entry.verdict !== undefined));
     const map = new Map();
     rows.forEach((entry) => {
       if (entry.source === 'accepted') return;            // старый формат: отдельная запись о вставке
-      const key = String((groupBy === 'type' ? entry.type : (entry.step || entry.task)) || '—');
+      const key = String((groupBy === 'type' ? entry.type : (entry.step || entry.task || entry.verdict)) || '—');
       if (!map.has(key)) map.set(key, { key: key, offered: 0, accepted: 0, edited: 0, invalid: 0, rules: 0 });
       const item = map.get(key);
       item.offered += 1;
@@ -4901,16 +5026,23 @@
 
     risk: {
       icon: '⚖',
-      title: 'Риск покупателя',
+      title: 'Решение по тикету',
       kind: 'json',
-      system: AI_RULES + ' Верни только JSON: {"verdict":"низкий|средний|высокий","score":0-100,"reasons":["…"],"advice":"…"}.',
+      system: AI_RULES + ' Верни только JSON: {"verdict":"согласен|не согласен","score":0-100,' +
+        '"reasons":["…"],"advice":"…"}. score не пересчитывай — повтори тот, что дан.',
       build: (context, extra) => [
-        'ЗАДАЧА: объясни словами готовую оценку риска. Балл уже посчитан скриптом — не пересчитывай его.',
-        'Скажи, какое слагаемое главное, чего не хватает для уверенности и что делать оператору.',
+        'ЗАДАЧА: проверь готовое решение по переписке и скажи, согласен ли ты с ним.',
+        'Балл риска и вердикт уже посчитаны скриптом по правилам оператора — НЕ пересчитывай их.',
+        'Твоя работа: 1) сверить вердикт с тем, что реально написано в переписке;',
+        '2) назвать пункты анкеты, на которые покупатель уже ответил, даже если слова были другие;',
+        '3) сказать, чего не хватает для уверенности.',
+        'Если в переписке есть то, чего правила не видят, — скажи об этом прямо и предложи другой вердикт.',
         '',
-        'РАСЧЁТ (доли от оплаченных заказов):', extra || '(расчёта нет)',
+        'ГОТОВОЕ РЕШЕНИЕ:', extra || '(расчёта нет)',
         '',
-        'ДАННЫЕ:', factsBlock(context)
+        'ДАННЫЕ:', factsBlock(context),
+        '',
+        'ПЕРЕПИСКА:', context.chat
       ].join('\n')
     },
 
@@ -4976,6 +5108,279 @@
       ].join('\n')
     }
   };
+
+  // ---------- Стоп-слова и анкета ----------
+
+  /**
+   * Слово, после которого автоматика на этом тикете выключается целиком.
+   * Одна дорогая ошибка тут стоит дороже всей экономии на подстановках.
+   */
+  function stopWordHit(chat) {
+    const text = normalizeText(chat);
+    if (!text) return '';
+    const words = String(aiConfig().stopWords || '').split(',').map(normalizeText).filter(Boolean);
+    // целым словом, а не куском: «иск» не должен срабатывать на «искал», а «суд» — на «посуда»
+    return words.filter((word) => {
+      const safe = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      try { return new RegExp('(^|[^a-zа-яё0-9])' + safe + '([^a-zа-яё0-9]|$)', 'i').test(text); }
+      catch (e) { return text.indexOf(word) !== -1; }
+    })[0] || '';
+  }
+
+  /** Разбор анкеты: «Пункт | слова». */
+  function parseForm(text) {
+    return String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && line.charAt(0) !== '#')
+      .map((line) => {
+        const parts = line.split('|');
+        const title = parts[0].trim();
+        if (!title) return null;
+        return { title: title, words: (parts[1] || '').split(',').map(normalizeText).filter(Boolean) };
+      })
+      .filter(Boolean);
+  }
+
+  /**
+   * Что из анкеты покупатель уже закрыл. Считается по словам — без модели и без догадок;
+   * пункт без слов помечается «решает модель», чтобы не выдавать незнание за ответ.
+   */
+  function formCheck(chat) {
+    const text = normalizeText(chat);
+    return parseForm(aiConfig().form).map((item) => {
+      if (!item.words.length) return { title: item.title, state: 'unknown', word: '' };
+      const hit = item.words.filter((word) => text.indexOf(word) !== -1)[0];
+      return { title: item.title, state: hit ? 'done' : 'missing', word: hit || '' };
+    });
+  }
+
+  function formMissing(list) {
+    return list.filter((item) => item.state === 'missing').map((item) => item.title);
+  }
+
+  // ---------- Конвейер: неотвеченные подряд ----------
+
+  const LINE_KEY = 'arh.line.v1';
+
+  function loadLine() {
+    try {
+      const raw = hasGM ? GM_getValue(LINE_KEY, null) : localStorage.getItem(LINE_KEY);
+      const parsed = typeof raw === 'string' && raw ? JSON.parse(raw) : raw;
+      return parsed && Array.isArray(parsed.items) ? parsed : { items: [], at: 0, ts: 0 };
+    } catch (e) { return { items: [], at: 0, ts: 0 }; }
+  }
+
+  function saveLine(line) {
+    try {
+      const json = JSON.stringify(line);
+      if (hasGM) GM_setValue(LINE_KEY, json); else localStorage.setItem(LINE_KEY, json);
+    } catch (e) { /* не критично */ }
+  }
+
+  /** Собирает очередь из неотвеченных и открывает первый тикет. */
+  function startLine(rows) {
+    const items = (rows || []).filter((row) => row.href)
+      .map((row) => ({ href: row.href, key: row.key, title: firstValue(row) }));
+    if (!items.length) { toast('Нечего ставить в конвейер'); return; }
+    saveLine({ items: items, at: 0, ts: Date.now() });
+    closeOverlay();
+    location.href = items[0].href;
+  }
+
+  /** Где мы в конвейере: индекс текущего тикета или -1. */
+  function lineSpot(line) {
+    const key = ticketKey(location.href);
+    return (line.items || []).findIndex((item) => item.key === key);
+  }
+
+  function lineGo(step) {
+    const line = loadLine();
+    const at = lineSpot(line);
+    const next = (at === -1 ? line.at : at) + step;
+    if (next < 0 || next >= line.items.length) {
+      toast(next < 0 ? 'Это первый тикет конвейера' : 'Конвейер пройден целиком');
+      return;
+    }
+    line.at = next;
+    saveLine(line);
+    location.href = line.items[next].href;
+  }
+
+  /** Полоска конвейера в панели: где мы и что дальше. */
+  function lineBlock() {
+    const line = loadLine();
+    if (!line.items.length || Date.now() - line.ts > 12 * 3600000) return null;
+    const at = lineSpot(line);
+    if (at === -1) return null;
+
+    const box = h('div');
+    const head = h('div', 'side-note');
+    head.textContent = 'Конвейер: ' + (at + 1) + ' из ' + line.items.length;
+    box.appendChild(head);
+
+    const row = h('div', 'side-row');
+    const back = h('button', 'icon', '←');
+    back.title = 'Предыдущий тикет (Alt+←)';
+    back.addEventListener('click', () => lineGo(-1));
+    const next = h('button', 'icon', 'дальше →');
+    next.title = 'Следующий неотвеченный (Alt+→)';
+    next.addEventListener('click', () => lineGo(1));
+    const stop = h('button', 'icon', '×');
+    stop.title = 'Закончить конвейер';
+    stop.addEventListener('click', () => { saveLine({ items: [], at: 0, ts: 0 }); fillSidePanel(); });
+    row.append(back, next, stop);
+    box.appendChild(row);
+    return box;
+  }
+
+  // ---------- Теневой режим: решаем молча и сверяем с оператором ----------
+
+  let shadowTicket = '';
+
+  /** Похожесть двух ответов: доля общих слов длиннее трёх букв. */
+  function textOverlap(a, b) {
+    const words = (text) => normalizeText(text).split(/[^а-яёa-z0-9]+/i).filter((word) => word.length > 3);
+    const first = words(a);
+    const second = words(b);
+    if (!first.length || !second.length) return 0;
+    const set = new Set(second);
+    const common = first.filter((word) => set.has(word)).length;
+    return common / Math.max(first.length, second.length);
+  }
+
+  /**
+   * Тихое решение при открытии тикета: ничего не вставляет и не показывает.
+   * Нужно ровно для одного — набрать статистику до того, как автоматике что-то доверят.
+   */
+  async function shadowDecide() {
+    const auto = autoConfig();
+    const conf = aiConfig();
+    if (!auto.shadow || !conf.enabled || !siteMatches(panelConfig().site)) return;
+
+    const key = ticketKey(location.href);
+    if (!key || key === shadowTicket) return;              // один тикет — одно тихое решение
+    shadowTicket = key;
+
+    const chat = aiPageText();
+    if (!chat || stopWordHit(chat)) return;
+    const steps = parsePlaybook(conf.playbook);
+    if (!steps.length) return;
+
+    let step = matchPlaybookRule(steps, chat);
+    let source = 'rule';
+    if (!step && auto.shadowModel && !aiBusy) {
+      try {
+        const answer = await aiAsk(AI_RULES + ' Верни только JSON {"step":"id"}.',
+          'Выбери следующий шаг из списка по переписке. Только id.\n\nШАГИ:\n' +
+          steps.map((item) => '- ' + item.id + ': ' + (item.when || item.title)).join('\n') +
+          '\n\nПЕРЕПИСКА:\n' + chat, { temperature: 0 });
+        const data = parseJsonLoose(answer);
+        step = data && steps.filter((item) => item.id === String(data.step))[0];
+        source = 'model';
+      } catch (e) { return; }
+    }
+    if (!step) return;
+
+    logDecision({ step: step.id, source: source, shadow: true, offer: String(step.text || '').slice(0, 400) });
+  }
+
+  /**
+   * Что оператор отправил на самом деле. Сверяем с тихим решением: совпало — плюс в копилку
+   * доверия, не совпало — видно, на каких шагах скрипт ошибается.
+   */
+  function noteOperatorSend(text) {
+    const sent = String(text || '').trim();
+    if (sent.length < 15) return;
+    const key = ticketKey(location.href);
+
+    // в конвейере отправка — это команда «дальше»: за этим его и включают
+    const line = loadLine();
+    if (line.items.length && lineSpot(line) !== -1) {
+      toast('Отправлено — перехожу к следующему');
+      setTimeout(() => lineGo(1), 1600);
+    }
+
+    const log = loadLog();
+    for (let i = log.length - 1; i >= 0; i--) {
+      const entry = log[i];
+      if (!entry.shadow || entry.matched !== undefined || entry.ticket !== key) continue;
+      const share = textOverlap(entry.offer || '', sent);
+      logUpdate(entry.id, { matched: share >= 0.6, overlap: Math.round(share * 100), sent: sent.slice(0, 400) });
+      return;
+    }
+  }
+
+  /** Ловим отправку ответа: клик по кнопке отправки или submit формы. */
+  function watchSending() {
+    if (window.top !== window.self) return;
+    const grab = (el) => {
+      const field = (el && el.form && el.form.querySelector('textarea, input[type="text"]')) || findReplyField();
+      if (field) noteOperatorSend(readContent(field));
+    };
+    document.addEventListener('submit', (event) => {
+      const form = event.target;
+      const field = form && form.querySelector && form.querySelector('textarea, input[type="text"]');
+      if (field) noteOperatorSend(readContent(field));
+    }, true);
+    document.addEventListener('click', (event) => {
+      const el = event.target && event.target.closest && event.target.closest('button, input[type="submit"], a');
+      if (!el) return;
+      if (rootEl && el.getRootNode && el.getRootNode() === rootEl) return;     // наши же кнопки
+      const label = normalizeText(el.value || el.textContent);
+      if (!label || !/отправ|ответить|send/.test(label)) return;
+      grab(el);
+    }, true);
+  }
+
+  // ---------- Вердикт: чем закрывать тикет ----------
+
+  function parseVerdicts(text) {
+    return String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && line.charAt(0) !== '#')
+      .map((line) => {
+        const head = /^\[([^\]|]+)(?:\|([^\]]+))?\]\s*(.*)$/.exec(line);
+        if (!head) return null;
+        const id = head[1].trim();
+        if (!id) return null;
+        const rest = String(head[3] || '');
+        const field = (name) => {
+          const found = new RegExp(name + '\\s*:\\s*([^|]+)', 'i').exec(rest);
+          return found ? found[1].trim().toLowerCase() : '';
+        };
+        const range = /(\d+)\s*-\s*(\d+)/.exec(field('риск'));
+        return {
+          id: id,
+          title: (head[2] || id).trim(),
+          money: /^да|yes/i.test(field('деньги')),
+          min: range ? Number(range[1]) : 0,
+          max: range ? Number(range[2]) : 100,
+          form: field('анкета') || 'любая'
+        };
+      })
+      .filter(Boolean);
+  }
+
+  /**
+   * Подбор вердикта по уже посчитанному: балл риска и заполненность анкеты.
+   * Никакой модели — это таблица, которую оператор сам и написал.
+   */
+  function pickVerdict(state) {
+    const list = parseVerdicts(aiConfig().verdicts);
+    const score = Number(state.score) || 0;
+    const complete = !state.missing.length;
+    const checked = list.map((item) => {
+      const inRange = score >= item.min && score <= item.max;
+      const formOk = item.form === 'любая' ||
+        (item.form === 'полная' ? complete : !complete);
+      const why = [];
+      if (!inRange) why.push('риск ' + score + ' вне ' + item.min + '–' + item.max);
+      if (!formOk) why.push(item.form === 'полная' ? 'анкета неполная' : 'анкета уже полная');
+      return Object.assign({}, item, { fits: inRange && formOk, why: why.join(', ') });
+    });
+    const best = checked.filter((item) => item.fits)[0] || null;
+    return { list: checked, best: best, complete: complete, score: score };
+  }
 
   // ---------- Фото клада ----------
 
@@ -5408,7 +5813,9 @@
    * Порог считается по журналу: см. autoDecision. Отправку не делаем никогда.
    */
   async function offerStep(step, info) {
-    const decision = autoDecision(step.id);
+    const stop = stopWordHit(aiPageText());
+    if (stop) info.auto = 'автоматика выключена: в переписке есть «' + stop + '»';
+    const decision = stop ? { allowed: false, reason: 'стоп-слово' } : autoDecision(step.id);
     if (decision.allowed) {
       const field = findReplyField();
       const blocked = autoBlockedReason(info.text, field);
@@ -5525,13 +5932,26 @@
   /** Окно риска: сначала расчёт по числам панели, и только по кнопке — слово модели. */
   function showRiskWindow() {
     const facts = aiFacts();
-    const risk = riskScore(facts, aiPageText());
+    const chat = aiPageText();
+    const risk = riskScore(facts, chat);
+    const form = formCheck(chat);
+    const missing = formMissing(form);
+    const stop = stopWordHit(chat);
+    const verdict = pickVerdict({ score: risk.score, missing: missing });
+    const logId = logDecision({
+      verdict: verdict.best ? verdict.best.id : 'нет',
+      source: 'rule',
+      offer: 'риск ' + risk.score + ', анкета: ' + (missing.length ? 'не хватает ' + missing.length : 'полная')
+    });
+
     const overlay = createOverlay();
+    pendingOffer = logId || null;
     const panel = h('div', 'panel');
+    panel.style.width = 'min(760px, 100%)';
     overlay.appendChild(panel);
 
     const head = h('div', 'head');
-    head.append(h('h2', null, '⚖ Риск покупателя'), h('span', 'spacer'));
+    head.append(h('h2', null, '⚖ Решение по тикету'), h('span', 'spacer'));
     panel.appendChild(head);
 
     const body = h('div', 'body');
@@ -5539,11 +5959,85 @@
     const foot = h('div', 'foot');
     panel.appendChild(foot);
 
+    if (stop) {
+      const warn = h('div', 'side-alarm');
+      warn.style.cssText = 'padding:8px 10px;border-radius:6px;margin-bottom:10px;font-weight:600';
+      warn.textContent = '⚠ Стоп-слово «' + stop + '» — решает только человек, автоматика на этом тикете выключена';
+      body.appendChild(warn);
+    }
+
+    // ---- вердикт ----
     const title = h('div');
-    title.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:8px';
-    title.textContent = 'Риск: ' + risk.level + (risk.base ? ' · ' + risk.score + '/100' : '');
-    title.style.color = risk.score >= 60 ? '#b3261e' : (risk.score >= 30 ? '#8a6d00' : '#1b7a3d');
+    title.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:4px';
+    title.textContent = verdict.best ? 'Вердикт: ' + verdict.best.title : 'Вердикт: подходящего правила нет';
+    title.style.color = verdict.best && verdict.best.money ? '#8a6d00' : '#1b7a3d';
     body.appendChild(title);
+
+    const vwhy = h('p', 'hint');
+    vwhy.style.marginTop = '0';
+    vwhy.innerHTML = verdict.best
+      ? 'Первое подходящее правило сверху: риск ' + risk.score + ' в диапазоне ' + verdict.best.min + '–' +
+        verdict.best.max + ', анкета — ' + verdict.best.form + '. ' +
+        (verdict.best.money
+          ? '<b>Это решение двигает деньги или товар, поэтому подставляться само оно не будет никогда.</b>'
+          : 'Такое решение автоматика подставить может, если шаг наберёт точность.')
+      : 'Ни одно правило не подошло: риск ' + risk.score + ', анкета ' +
+        (missing.length ? 'неполная' : 'полная') + '. Правила правятся на вкладке «ИИ».';
+    body.appendChild(vwhy);
+
+    const vtable = h('table', 'grid');
+    const vhead = h('tr');
+    [['Решение', 'Из вашей таблицы вердиктов'], ['Деньги', 'Двигает ли деньги или товар'],
+     ['Риск', 'Допустимый диапазон балла'], ['Анкета', 'Каким должно быть её состояние'],
+     ['Подходит', 'Почему подошло или нет']].forEach((pair) => {
+      const cell = h('th', null, pair[0]);
+      cell.title = pair[1];
+      vhead.appendChild(cell);
+    });
+    vtable.appendChild(vhead);
+    verdict.list.forEach((item) => {
+      const tr = h('tr');
+      if (verdict.best && item.id === verdict.best.id) tr.style.fontWeight = '600';
+      tr.appendChild(h('td', null, item.title));
+      tr.appendChild(h('td', null, item.money ? 'да — только вручную' : 'нет'));
+      tr.appendChild(h('td', null, item.min + '–' + item.max));
+      tr.appendChild(h('td', null, item.form));
+      const fits = h('td', null, item.fits ? 'да' : (item.why || 'нет'));
+      fits.className = item.fits ? 'good-cell' : '';
+      tr.appendChild(fits);
+      vtable.appendChild(tr);
+    });
+    const vwrap = h('div', 'table-holder');
+    vwrap.appendChild(vtable);
+    body.appendChild(vwrap);
+
+    // ---- анкета ----
+    const formBox = document.createElement('details');
+    formBox.style.marginTop = '12px';
+    formBox.open = !!missing.length;
+    const formSummary = document.createElement('summary');
+    formSummary.textContent = missing.length
+      ? 'Анкета: не хватает ' + missing.length + ' из ' + form.length
+      : 'Анкета: закрыта полностью (' + form.length + ')';
+    formSummary.style.cssText = 'cursor:pointer;font-size:12px;color:#5b6273';
+    formBox.appendChild(formSummary);
+    form.forEach((item) => {
+      const row = h('div', 'side-row');
+      const mark = item.state === 'done' ? '✓' : (item.state === 'missing' ? '—' : '?');
+      row.append(h('span', 'side-label', mark + ' ' + item.title),
+                 h('span', 'side-value' + (item.state === 'done' ? '' : ' side-dim'),
+                   item.state === 'done' ? 'нашлось: ' + item.word
+                     : (item.state === 'missing' ? 'ответа не видно' : 'слов не задано — спросите модель')));
+      formBox.appendChild(row);
+    });
+    body.appendChild(formBox);
+
+    // ---- расчёт риска ----
+    const title2 = h('div');
+    title2.style.cssText = 'font-size:14px;font-weight:600;margin:14px 0 4px';
+    title2.textContent = 'Риск: ' + risk.level + (risk.base ? ' · ' + risk.score + '/100' : '');
+    title2.style.color = risk.score >= 60 ? '#b3261e' : (risk.score >= 30 ? '#8a6d00' : '#1b7a3d');
+    body.appendChild(title2);
 
     const hint = h('p', 'hint');
     hint.style.marginTop = '0';
@@ -5616,18 +6110,31 @@
       body.appendChild(from);
     }
 
+    const lines = () => [
+      'Вердикт по правилам: ' + (verdict.best ? verdict.best.title : 'не подобран'),
+      'Анкета: ' + (missing.length ? 'не хватает — ' + missing.join(', ') : 'закрыта полностью'),
+      stop ? 'Стоп-слово в переписке: ' + stop : '',
+      'Риск: ' + risk.level + ' · ' + risk.score + '/100'
+    ].filter(Boolean).concat(riskLines(risk));
+
     const ask = h('button', null, 'Спросить модель');
-    ask.title = 'Модель прокомментирует расчёт словами. Числа ей передаются готовыми';
-    ask.addEventListener('click', () => runAiTask('risk', riskLines(risk).join('\n') ||
-      'Слагаемых нет: панель не собрала чисел.'));
+    ask.title = 'Модель проверит вердикт по переписке. Числа и вердикт передаются готовыми';
+    ask.addEventListener('click', () => { pendingOffer = null; runAiTask('risk', lines().join('\n')); });
     const copy = h('button', null, 'Скопировать');
     copy.addEventListener('click', () => {
-      const text = 'Риск: ' + risk.level + ' · ' + risk.score + '/100\n' + riskLines(risk).join('\n');
-      try { navigator.clipboard.writeText(text); toast('Скопировано'); } catch (e) {}
+      try { navigator.clipboard.writeText(lines().join('\n')); toast('Скопировано'); } catch (e) {}
+    });
+    const agree = h('button', 'primary', 'Согласен');
+    agree.title = 'Записать в журнал, что вердикт верный — по этому и считается точность';
+    agree.addEventListener('click', () => {
+      logUpdate(logId, { accepted: true });
+      pendingOffer = null;
+      closeOverlay();
+      toast('Записано: вердикт принят');
     });
     const close = h('button', null, 'Закрыть');
     close.addEventListener('click', closeOverlay);
-    foot.append(copy, ask, h('span', 'spacer'), close);
+    foot.append(copy, ask, h('span', 'spacer'), agree, close);
   }
 
   function showAiWindow(task, result) {
@@ -6735,6 +7242,11 @@
         waitBox.addEventListener('change', () => { filters.onlyWaiting = waitBox.checked; renderTable(); });
         onlyWaiting.append(waitBox, document.createTextNode('ждут ответа'));
         line.appendChild(onlyWaiting);
+
+        const lineBtn = h('button', null, 'Конвейер');
+        lineBtn.title = 'Открыть неотвеченные подряд, по одному: Alt+→ — следующий';
+        lineBtn.addEventListener('click', () => startLine(data.rows.filter((row) => isWaiting(row, rule))));
+        line.appendChild(lineBtn);
       }
       body.appendChild(line);
 
@@ -6988,11 +7500,33 @@
       line.append(period, group, save, wipe);
       body.appendChild(line);
 
+      const shadowNote = h('p', 'hint');
+      shadowNote.style.marginTop = '4px';
+      body.appendChild(shadowNote);
+
       const holder = h('div', 'table-holder');
       body.appendChild(holder);
 
+      const drawShadow = () => {
+        const since = state.days ? Date.now() - state.days * 86400000 : 0;
+        const rows = loadLog().filter((entry) => entry.shadow && entry.ts >= since);
+        if (!rows.length) {
+          shadowNote.innerHTML = '<b>Теневой режим</b> ещё ничего не записал. Он решает молча при открытии ' +
+            'тикета и сверяет решение с тем, что вы отправили, — включается на вкладке «ИИ».';
+          return;
+        }
+        const answered = rows.filter((entry) => entry.matched !== undefined);
+        const hit = answered.filter((entry) => entry.matched).length;
+        shadowNote.innerHTML = '<b>Теневой режим:</b> решений ' + rows.length + ', сверено с вашим ответом ' +
+          answered.length + (answered.length ? ', совпало ' + hit + ' (' +
+          Math.round((hit / answered.length) * 100) + '%)' : '') +
+          (rows.length - answered.length ? ', ждут вашего ответа ' + (rows.length - answered.length) : '') +
+          '. Эти решения идут в тот же счёт доверия, что и принятые вручную.';
+      };
+
       function draw() {
         holder.textContent = '';
+        drawShadow();
         const stepIds = parsePlaybook(aiConfig().playbook).map((step) => step.id);
         const stats = logStats(state.days, state.group);
         const totals = stats.reduce((acc, item) => {
@@ -7544,8 +8078,14 @@
   updateSidePanel();
   startWatchers();
   if (window.top === window.self) {
-    watchUrlChanges(() => { updateSidePanel(); setTimeout(autoOnOpen, 1200); });
+    watchUrlChanges(() => {
+      updateSidePanel();
+      setTimeout(autoOnOpen, 1200);
+      setTimeout(shadowDecide, 1400);
+    });
     setTimeout(autoOnOpen, 1500);                          // страница успевает дорисовать переписку
+    setTimeout(shadowDecide, 1700);
+    watchSending();
   }
 
   if (window.top === window.self && typeof GM_registerMenuCommand === 'function') {
